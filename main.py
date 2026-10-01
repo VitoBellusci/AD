@@ -25,10 +25,7 @@ def main():
     config = PreprocessingConfig("./preprocessing/preprocessing_config.json")
     
 
-    # ---------------------------------------------------------
     # CARICAMENTO METADATI GOOGLE CARTOON SET
-    # ---------------------------------------------------------
-    # Punta alla cartella principale che contiene le sottocartelle 0, 1, 2...
     image_dir = "./data/cartoonset100k_jpg" 
     csv_path = "./data/meta/cartoon_image_attributes.csv"
 
@@ -57,7 +54,7 @@ def main():
     train_image_paths = [image_paths[i] for i in train_idx]
     
     # 4. Generazione Didascalie e Fit del Tokenizer SOLO sul Training Set
-    caption_gen = CaptionGenerator(config.template)
+    caption_gen = CaptionGenerator()
     train_texts = [caption_gen.generate(m) for m in train_metadata]
     
     tokenizer = AvatarTokenizer(config)

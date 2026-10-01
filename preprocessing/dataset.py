@@ -46,8 +46,7 @@ class AvatarDataset(Dataset):
         meta = self.metadata[idx]
         caption_text = self.caption_gen.generate(meta)
         caption_tokens = self.tokenizer.encode(
-            caption_text,
-            max_len=self.config.max_seq_len
+            caption_text
         )
         caption_tensor = torch.tensor(caption_tokens, dtype=torch.long)
 

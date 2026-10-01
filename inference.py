@@ -139,18 +139,26 @@ if __name__ == "__main__":
     )
     
     # 1. Test Interattivo (Singolo Prompt, Singolo Seed)
-    # L'utente deve poter inserire un prompt specifico, scegliere un seed e ispezionare l'immagine 32x32 o 64x64 generata
-    test_prompt = "a blue cartoon avatar with round eyes and exaggerated proportions" #
-    user_seed = 42
-    print(f"Test interattivo con prompt: {test_prompt}")
-    generator.generate(prompt=test_prompt, seed=user_seed, guidance_scale=3.5, plot=True)
-    
+    # L'utente può inserire un prompt e un seed personalizzati da terminale
+    while True:
+        user_input = input("\nInserisci un prompt per generare l'avatar (o 'exit' per uscire): ")
+        if user_input.lower() == 'exit':
+            break
+
+        try:
+            seed_input = input("Inserisci un seed numerico (es. 42): ")
+            user_seed = int(seed_input)
+        except ValueError:
+            print("Seed non valido. Utilizzo seed predefinito 42.")
+            user_seed = 42
+
+        print(f"Generazione in corso per: {user_input} (Seed: {user_seed})...")
+        generator.generate(prompt=user_input, seed=user_seed, guidance_scale=3.5, plot=True)
+
     # 2. Valutazione Out-Of-Distribution (Generalizzazione Composizionale)
-    # Valutazione su prompt OOD composizionali (combinazioni non viste in addestramento)
+    # Se vuoi ancora eseguire i test automatici OOD, decommenta le righe seguenti:
     ood_test_prompts = [
-        "a blue cartoon avatar with round eyes and exaggerated proportions", #
+        "a blue cartoon avatar with round eyes and exaggerated proportions",
         "a red avatar with standard eyes and normal proportions"
     ]
-    
-    # Ispeziona le generazioni attraversando diversi seed piuttosto che selezionare solo il campione più attraente
-    generator.evaluate_ood_combinations(ood_test_prompts, num_seeds=4) #
+    generator.evaluate_ood_combinations(ood_test_prompts, num_seeds=4)
