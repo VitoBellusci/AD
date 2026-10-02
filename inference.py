@@ -38,7 +38,7 @@ class AvatarGenerator:
         self.text_encoder.eval()
 
     def _load_checkpoint(self, path: str):
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.unet.load_state_dict(checkpoint['unet_state_dict'])
         self.text_encoder.load_state_dict(checkpoint['text_encoder_state_dict'])
         print(f"Checkpoint caricato con successo dall'epoca {checkpoint['epoch']}")
@@ -134,8 +134,8 @@ if __name__ == "__main__":
     # Inizializza il generatore
     # NOTA: Assicurati di avere il file JSON di configurazione e i pesi salvati
     generator = AvatarGenerator(
-        config_path="preprocessing_config.json", 
-        checkpoint_path="checkpoints/checkpoint_epoch_50.pt"
+        config_path="./preprocessing/preprocessing_config.json", 
+        checkpoint_path="checkpoints/checkpoint_epoch_2.pt"
     )
     
     # 1. Test Interattivo (Singolo Prompt, Singolo Seed)
