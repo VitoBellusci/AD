@@ -135,7 +135,7 @@ if __name__ == "__main__":
     # NOTA: Assicurati di avere il file JSON di configurazione e i pesi salvati
     generator = AvatarGenerator(
         config_path="./preprocessing/preprocessing_config.json", 
-        checkpoint_path="checkpoints/checkpoint_epoch_2.pt"
+        checkpoint_path="checkpoints/checkpoint_epoch_22.pt"
     )
     
     # 1. Test Interattivo (Singolo Prompt, Singolo Seed)

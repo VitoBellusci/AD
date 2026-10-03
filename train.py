@@ -40,9 +40,12 @@ def train(
     forward_process,
     dataloader: DataLoader,
     tokenizer,
+    optimizer,
+    scheduler,
     epochs: int,
     device: str,
     checkpoint_dir: str = "checkpoints",
+    start_epoch: int = 0,
     conditional: bool = True,
     cfg_drop_rate: float = 0.1,
     lr: float = 1e-4
@@ -61,18 +64,18 @@ def train(
     # Ottimizzatore congiunto per U-Net e Text Encoder, per gestire l'aggiornamento simultaneo dei parametri
     # Viene scelto AdamW per offrire maggiore stabilità, garantendo che il weight decay venga applicato con la stessa
     # efficacia a tutti i layer
-    optimizer = optim.AdamW(list(unet.parameters()) + list(text_encoder.parameters()), lr=lr, weight_decay=1e-4)
+    # optimizer = optim.AdamW(list(unet.parameters()) + list(text_encoder.parameters()), lr=lr, weight_decay=1e-4)
     criterion = nn.MSELoss()
 
-    # Scheduler per il learning rate. Riduce progressivamente il lr seguendo una curva cosinoidale
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    # # Scheduler per il learning rate. Riduce progressivamente il lr seguendo una curva cosinoidale
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     unet.train()
     text_encoder.train()
 
     print(f"Inizio Addestramento - Modalità: {'Condizionata' if conditional else 'Incondizionata (Baseline)'}")
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         epoch_loss = 0.0
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
 

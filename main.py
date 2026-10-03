@@ -3,6 +3,9 @@ import csv
 import os
 import json
 from torch.utils.data import DataLoader
+import glob
+import torch
+import torch.optim as optim
 
 # Import dei moduli della pipeline
 from preprocessing.config import PreprocessingConfig
@@ -78,18 +81,54 @@ def main():
         vocab_size=vocab_size, 
         max_seq_len=config.max_seq_len,
         d_model=128
-    )
+    ).to(device)
     
     unet = Unet(
         in_channels=3, 
         out_channels=3, 
         base_channels=64, 
         context_dim=128
-    )
+    ).to(device)
     
     # 7. Inizializzazione Processo di Diffusione (Forward)
     forward_process = DiffusionForwardProcess(num_time_steps=1000, device=device)
-    
+    start_epoch = 0
+
+    # 2. Inizializza l'ottimizzatore e lo scheduler QUI, nel main
+    optimizer = optim.AdamW(list(unet.parameters()) + list(text_encoder.parameters()), lr=1e-4, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50)
+
+    # 3. Logica di ricerca e caricamento del Checkpoint
+    checkpoint_files = glob.glob(os.path.join('checkpoints', "*.pt"))
+
+    if checkpoint_files:
+        # Trova il file più recente in base alla data di creazione
+        latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
+        print(f"Trovato checkpoint! Ripristino da: {latest_checkpoint}")
+        
+        # Carica il checkpoint mappandolo sul device corretto (GPU)
+        checkpoint = torch.load(latest_checkpoint, map_location=device, weights_only=False)
+        
+        # Ripristina i pesi della rete
+        unet.load_state_dict(checkpoint['unet_state_dict'])
+        text_encoder.load_state_dict(checkpoint['text_encoder_state_dict'])
+        
+        # Ripristina lo stato dell'ottimizzatore e dello scheduler
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Ripristina i seed per la perfetta riproducibilità del rumore (opzionale ma consigliato)
+        if 'torch_rng_state' in checkpoint:
+            torch.set_rng_state(checkpoint['torch_rng_state'].cpu())
+        if 'torch_cuda_rng_state' in checkpoint and checkpoint['torch_cuda_rng_state'] is not None:
+            if torch.cuda.is_available():
+                cuda_rng_states = [state.cpu() for state in checkpoint['torch_cuda_rng_state']]
+                torch.cuda.set_rng_state_all(cuda_rng_states)           
+        # Imposta l'epoca da cui ripartire
+        start_epoch = checkpoint['epoch']
+        print(f"Ripresa del training dall'epoca {start_epoch + 1}")
+    else:
+        print("Nessun checkpoint trovato. Inizio addestramento da zero.")
     # 8. Avvio dell'Addestramento
     # Per eseguire la baseline incondizionata, imposta conditional=False
     print("Avvio del loop di training...")
@@ -99,10 +138,13 @@ def main():
         forward_process=forward_process,
         dataloader=train_loader,
         tokenizer=tokenizer,
+        optimizer=optimizer,
+        scheduler=scheduler,
         epochs=50,
         device=device,
         checkpoint_dir="checkpoints",
-        conditional=True, # Imposta a True per il conditional model[cite: 4]
+        start_epoch=start_epoch,
+        conditional=True, # Imposta a True per il conditional model
         cfg_drop_rate=0.1,
         lr=1e-4
     )
