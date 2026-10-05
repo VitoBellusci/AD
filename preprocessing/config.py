@@ -19,6 +19,7 @@ class PreprocessingConfig:
         self.std: List[float] = raw_config["std"]
         self.max_seq_len: int = raw_config["max_seq_len"]
         self.vocab_path: str = raw_config["vocab_path"]
+        self.splits_path: str = raw_config.get("splits_path", "preprocessing/splits.json")
 
         # 3. Ricostruzione delle strutture complesse non gestibili nel file JSON
         # Converte [[["color", "blue"], ["proportion", "exaggerated"]]] 

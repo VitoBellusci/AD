@@ -4,12 +4,11 @@
   "norm_max": 1.0,
   "mean": [0.5, 0.5, 0.5],
   "std": [0.5, 0.5, 0.5],
-  "ood_blocked_combinations": [
-    [
-      ["color", "blue"],
-      ["proportion", "exaggerated"]
-    ]
-  ],
   "max_seq_len": 20,
-  "vocab_path": "preprocessing/vocab.json"
+  "vocab_path": "preprocessing/vocab.json",
+  "splits_path": "preprocessing/splits.json",
+  "ood_blocked_combinations": [
+    [["hair", "98"], ["glasses", "11"]]
+  ]
 }
+

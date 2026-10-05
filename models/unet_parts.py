@@ -216,26 +216,17 @@ class SpatialSelfAttention(nn.Module):
 # query_dim: canali dell'immagine
 # context_dim: dimensione degli embedding testuali
 class SpatialCrossAttention(nn.Module):
-    def __init__(self, query_dim, context_dim, heads=8, dim_head=64, dropout=0.0):
+    def __init__(self, query_dim, context_dim, heads=8, dropout=0.0):
         super().__init__()
-        
-        # Dimensione latente totale
-        inner_dim = dim_head * heads
         self.heads = heads
+        inner_dim = query_dim * heads
+
+        self.norm = nn.GroupNorm(num_groups=32, num_channels=query_dim, eps=1e-6, affine=True)
         
-        # Norm layer essenziale per stabilizzare i gradienti nei modelli di diffusione
-        self.norm = nn.GroupNorm(8, query_dim)
-        
-        # Proiezioni lineari: 
-        # to_q riceve la dimensione dei canali dell'immagine
-        # to_k e to_v ricevono la dimensione dell'embedding testuale
-        # Si imposta il bias a False perché l'obiettivo del meccanismo di attenzione è 
-        # misurare la similarità angolare  (il prodotto scalare) tra vettori nello spazio latente
         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
-
-        # Proiezione finale per ripristinare la dimensionalità iniziale
+        
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, query_dim),
             nn.Dropout(dropout)
@@ -243,49 +234,50 @@ class SpatialCrossAttention(nn.Module):
 
 
     # Prende in ingresso il tensore dell'immagine x e il testo
-    def forward(self, x, context):
-
-        # Batch, canali, altezza, larghezza
+    def forward(self, x, context, mask=None):
         b, c, h, w = x.shape
-        
-        # Normalizzazione spaziale
         x_norm = self.norm(x)
-        
-        # Flatten spaziale: [B, C, H, W] -> [B, C, H*W] -> trasposizione in [B, H*W, C].
-        # Appiattisce altezza e larghezza in una sola dimensione
-        # I pixel diventano i "token" della sequenza visuale
-        # Permute inverte gli assi, fornendo il formato richiesto dalle proiezioni lineari
-        x_flat = x_norm.view(b, c, -1).permute(0, 2, 1)
-        
-        # 3. Proiezioni lineari per Q, K, V
+        x_flat = x_norm.view(b, c, -1).permute(0, 2, 1) # [B, H*W, C]
+
         q = self.to_q(x_flat)
         k = self.to_k(context)
         v = self.to_v(context)
-        
-        # 4. Reshape per la Multi-Head Attention
-        # Dividiamo l'inner_dim nel numero di testine di attenzione (heads)
-        # Forma attesa: [Batch, Heads, Sequenza, Dim_Head]
+
+        # Reshape per Multi-Head Attention: [B, Heads, Seq_Len, Dim_Head]
         q = q.view(b, -1, self.heads, q.shape[-1] // self.heads).transpose(1, 2)
         k = k.view(b, -1, self.heads, k.shape[-1] // self.heads).transpose(1, 2)
         v = v.view(b, -1, self.heads, v.shape[-1] // self.heads).transpose(1, 2)
-        
-        # 5. Calcolo dell'Attenzione ottimizzata (FlashAttention)
-        # Sostituisce l'implementazione manuale (Q @ K.T -> softmax -> @ V) 
-        # riducendo l'impronta di memoria e massimizzando l'uso dei Tensor Core
+
+        # Gestione dinamica del rango della maschera per prevenire esplosione dimensionale
+        attn_mask = None
+        if mask is not None:
+            if mask.ndim == 2:
+                # [B, Seq_Len] -> [B, 1, 1, Seq_Len]
+                attn_mask = mask.unsqueeze(1).unsqueeze(2)
+            elif mask.ndim == 3:
+                # [B, 1, Seq_Len] -> [B, 1, 1, Seq_Len]
+                attn_mask = mask.unsqueeze(1)
+            elif mask.ndim == 4:
+                # Già [B, 1, 1, Seq_Len] o compatibile broadcast
+                attn_mask = mask
+            else:
+                attn_mask = mask.view(b, 1, 1, -1)
+
+            # scaled_dot_product_attention supporta maschere booleane (True = attend, False = ignore)
+            if attn_mask.dtype != torch.bool:
+                attn_mask = (attn_mask != 0)
+
         out = F.scaled_dot_product_attention(
-            q, k, v, 
+            q, k, v,
+            attn_mask=attn_mask,
             dropout_p=self.to_out[1].p if self.training else 0.0
         )
-        
-        # 6. Riassemblaggio degli Head
+
+        # Defense-in-depth: sanitizza eventuali NaN derivanti da intere sequenze mascherate
+        if torch.isnan(out).any():
+            out = torch.nan_to_num(out, nan=0.0)
+
         out = out.transpose(1, 2).reshape(b, -1, out.shape[-1] * self.heads)
-        
-        # 7. Proiezione lineare finale
         out = self.to_out(out)
-        
-        # 8. Unflatten spaziale e Connessione Residuale
-        # Ripristiniamo la forma spaziale [B, C, H, W], usando l'altezza e la larghezza originali
-        # per scartare l'array piatto
         out = out.permute(0, 2, 1).view(b, c, h, w)
-        
-        return x + out  # connessione residua
+        return x + out

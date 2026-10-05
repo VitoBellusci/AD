@@ -1,64 +1,74 @@
-from typing import List, Dict, Tuple, Any
-from preprocessing.config import PreprocessingConfig
+import json
+import os
 import random
+from typing import List, Dict, Tuple
 
 class CompositionalSplitter:
     """
-    Questa classe isola specifiche combinazioni semantiche per creare una valutazione
-    rigorosa. Si applica il concetto di OOD per testare la generalizzazione composizionale del modello.
-    Durante la fase di test sul set OOD, viene chiesto al modello di generare un'immagine partendo proprio
-    dalla combinazione bloccata che non ha mai visto per intero.
+    Partiziona il dataset in 4 split disgiunti:
+    - Train (80% dei dati in-distribution)
+    - Val (10% dei dati in-distribution)
+    - Test Ordinario (test_ind, 10% dei dati in-distribution)
+    - Test OOD (test_ood, campioni con combinazioni di attributi bloccate)
     """
-
-    def __init__(self, config: PreprocessingConfig):
+    def __init__(self, config):
         self.config = config
 
-    def split(self, metadata_list: List[Dict[str, Any]]) -> Tuple[List[int], List[int], List[int]]:
-        """
-        Restituisce gli indici delle immagini in tre set distinti (Train, Validation, OOD test),
-        ricevendo le liste dei dizionari dei metadati. Ogni dizionario all'interno di questa lista
-        rappresenta i metadati associati a una singola immagine del dataset
-        """
+    def split(self, metadata_list: List[Dict]) -> Tuple[List[int], List[int], List[int], List[int]]:
+        train_indices, ood_indices = [], []
         
-        train_indices = []
-        ood_indices = []
-        val_indices = []
+        # Estrazione e normalizzazione delle combinazioni bloccate OOD
+        raw_blocked = getattr(self.config, "ood_blocked_combinations", [])
+        if isinstance(self.config, dict):
+            raw_blocked = self.config.get("ood_blocked_combinations", [])
+            
+        blocked_sets = []
+        for combo in raw_blocked:
+            if isinstance(combo, set):
+                blocked_sets.append({(str(k), str(v)) for k, v in combo})
+            else:
+                blocked_sets.append({(str(x[0]), str(x[1])) for x in combo})
 
         for idx, meta in enumerate(metadata_list):
-            # Ogni dizionario viene convertito in un set contenente tuple di coppie chiave-valore
-            current_comb = { (k, v) for k, v in meta.items() }
-
-            is_ood = False
-            
-            # Viene recuperata la lista delle combinazioni vietate. Ogni set di questa lista
-            # è a sua volta un set di tuple che rappresenta un incrocio di attributi da isolare
-            for blocked_set in self.config.ood_blocked_combinations:
-                if blocked_set.issubset(current_comb):
-
-                    # Diventa true se tutti gli elementi di questa lista sono presenti nei metadati dell'immagine
-                    is_ood = True
-                    break
-
+            current_comb = {(str(k), str(v)) for k, v in meta.items()}
+            is_ood = any(
+                blocked_set.issubset(current_comb) 
+                for blocked_set in blocked_sets
+            )
             if is_ood:
                 ood_indices.append(idx)
             else:
                 train_indices.append(idx)
 
-        # Estrazione del validation set dal training set
+        # 4-Way Partition: Train (80%), Val (10%), Ordinary Test (10%), OOD Test (Held-out)
+        random.seed(42)
         random.shuffle(train_indices)
-        val_indices = train_indices[:int(len(train_indices) * 0.1)]
-        train_indices = train_indices[int(len(train_indices) * 0.1):]
+        n_total = len(train_indices)
+        val_size = int(n_total * 0.1)
+        test_size = int(n_total * 0.1)
+        
+        val_indices = train_indices[:val_size]
+        test_ind_indices = train_indices[val_size:val_size + test_size]
+        final_train_indices = train_indices[val_size + test_size:]
 
-        return train_indices, val_indices, ood_indices
+        # Salva le partizioni su disco per esatta riproducibilità
+        splits = {
+            "train": final_train_indices,
+            "val": val_indices,
+            "test_ind": test_ind_indices,
+            "test_ood": ood_indices
+        }
+        splits_path = getattr(self.config, "splits_path", None)
+        if isinstance(self.config, dict):
+            splits_path = self.config.get("splits_path", splits_path)
+        if not splits_path:
+            splits_path = "preprocessing/splits.json"
 
-    def verify_ood_isolation(self, train_meta: List[Dict]) -> bool:
-        """
-        Questa metodo verifica che non ci siano combinazioni OOD nei due dataset. Certifica che i dati finali
-        siano corretti. Potrebbero esserci errori di slicing, per questosi inserisce questo sanity check.
-        """
-        for meta in train_meta:
-            current_comb = { (k, v) for k, v in meta.items() }
-            for blocked_set in self.config.ood_blocked_combinations:
-                if blocked_set.issubset(current_comb):
-                    return False # Leakage trovato
-        return True
+        splits_dir = os.path.dirname(splits_path)
+        if splits_dir:
+            os.makedirs(splits_dir, exist_ok=True)
+            
+        with open(splits_path, "w", encoding="utf-8") as f:
+            json.dump(splits, f, indent=2)
+
+        return final_train_indices, val_indices, test_ind_indices, ood_indices

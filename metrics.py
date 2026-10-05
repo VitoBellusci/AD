@@ -62,22 +62,29 @@ class DiffusionEvaluator:
             "Peak VRAM Usage (MB)": max_vram_mb
         }
 
-    def update_quality_metrics(self, real_images, fake_images):
+    @staticmethod
+    def _ensure_zero_one_range(images: torch.Tensor) -> torch.Tensor:
         """
-        Aggiorna lo stato interno di FID e KID con nuovi batch di immagini.
-        I tensori devono essere normalizzati nel range [-1, 1] o [0, 1].
+        Normalizza in modo indipendente un tensore di immagini a [0.0, 1.0].
+        Gestisce in modo sicuro input sia in [-1.0, 1.0] che in [0.0, 1.0],
+        applicando clamp rigoroso per prevenire overflow in Inception-v3.
         """
-        # Assicuriamoci che i tensori siano nel formato atteso da normalize=True in torchmetrics (float 0.0 - 1.0)
-        # Se le tue immagini escono dal range [-1, 1], riportale a [0, 1]
-        if real_images.min() < 0.0:
-            real_images = (real_images + 1.0) / 2.0
-            fake_images = (fake_images + 1.0) / 2.0
+        if images.min() < 0.0:
+            images = (images + 1.0) / 2.0
+        return torch.clamp(images, 0.0, 1.0)
 
-        self.fid.update(real_images, real=True)
-        self.fid.update(fake_images, real=False)
+    def update_quality_metrics(self, real_images: torch.Tensor, fake_images: torch.Tensor):
+        """
+        Aggiorna lo stato interno di FID e KID con batch di immagini reali e generate.
+        """
+        real_norm = self._ensure_zero_one_range(real_images)
+        fake_norm = self._ensure_zero_one_range(fake_images)
+
+        self.fid.update(real_norm, real=True)
+        self.fid.update(fake_norm, real=False)
         
-        self.kid.update(real_images, real=True)
-        self.kid.update(fake_images, real=False)
+        self.kid.update(real_norm, real=True)
+        self.kid.update(fake_norm, real=False)
 
     def compute_quality_metrics(self):
         """
@@ -104,10 +111,8 @@ class DiffusionEvaluator:
         if generated_images.size(0) < 2:
             raise ValueError("Sono necessari almeno 2 seed per calcolare la diversità.")
 
-        # Trasforma il range da [-1, 1] a [0, 1] se necessario, poi a [-1, 1] richiesto da LPIPS interno,
-        # ma normalize=True nel costruttore di LPIPS gestisce input [0, 1].
-        if generated_images.min() < 0.0:
-             generated_images = (generated_images + 1.0) / 2.0
+        # Trasforma il range in modo rigoroso a [0.0, 1.0]
+        generated_images = self._ensure_zero_one_range(generated_images)
 
         pairwise_distances = []
         # Calcola LPIPS per ogni possibile coppia di immagini generate
@@ -119,3 +124,21 @@ class DiffusionEvaluator:
             
         mean_diversity = sum(pairwise_distances) / len(pairwise_distances)
         return mean_diversity
+
+class AttributeAlignmentEvaluator:
+    """
+    Attribute classification verification probe to evaluate whether
+    generated images match their text conditioning attributes (Blueprint 2.4).
+    """
+    def __init__(self, classifier_model, device):
+        self.device = torch.device(device)
+        self.classifier = classifier_model.to(self.device).eval()
+
+    def evaluate_alignment(self, images: torch.Tensor, expected_attributes: torch.Tensor) -> float:
+        with torch.no_grad():
+            images = images.to(self.device)
+            if isinstance(expected_attributes, torch.Tensor):
+                expected_attributes = expected_attributes.to(self.device)
+            preds = self.classifier(images)
+            correct = (preds == expected_attributes).float().mean()
+        return correct.item()

@@ -122,7 +122,7 @@ class MultiHeadAttentionBlock(nn.Module):
 
     @staticmethod
     # riceve i tensori già divisi per teste
-    def attention(query, key, value, mask, dropout):
+    def attention(query, key, value, mask=None, dropout=None):
 
         # dimensione di ogni singola testa
         d_k = query.shape[-1]
@@ -136,10 +136,19 @@ class MultiHeadAttentionBlock(nn.Module):
         #   - non permettere al modello di guardare i token futuri
 
         if mask is not None:
-            attention_scores = attention_scores.masked_fill(mask == 0, -1e-9)
+            if mask.ndim == 2:
+                mask = mask.unsqueeze(1).unsqueeze(2)
+            elif mask.ndim == 3:
+                mask = mask.unsqueeze(1)
+            # float("-inf") è lo standard PyTorch: softmax(float("-inf")) == 0.0 senza overflow
+            attention_scores = attention_scores.masked_fill(mask == 0, float("-inf"))
 
         # applicata lungo l'ultima dimensione che corrisponde al key_len
         attention_scores = attention_scores.softmax(dim=-1)
+
+        # Gestione di casi limite con intere righe mascherate (tutti -inf producono NaN in softmax)
+        if torch.isnan(attention_scores).any():
+            attention_scores = torch.nan_to_num(attention_scores, nan=0.0)
 
         if dropout is not None:
             attention_scores = dropout(attention_scores)
@@ -149,7 +158,7 @@ class MultiHeadAttentionBlock(nn.Module):
         return attention_scores @ value, attention_scores
 
     # i tensori possono provenire sia dallo stesso flusso (self-attention), che da flussi diversi (cross-attention)
-    def forward(self, q, k, v, mask):
+    def forward(self, q, k, v, mask=None):
         # proiezione lineare dell'input
         query = self.w_q(q)
         key = self.w_k(k)
@@ -221,15 +230,15 @@ class EncoderBlock(nn.Module):
                     ResidualConnection(dropout)
         ])
 
-    def forward(self, x, src_mask):
+    def forward(self, x, mask=None):
 
-        # src_mask è usata per ignorare i PAD token
+        # mask è usata per ignorare i PAD token
         x = self.residual_connections[0](
                 x,
 
                 # si usa la funzione lambda perché la connessione residua aspetta
                 # una funzione che riceve x come input
-                lambda x: self.self_attention_block(x, x, x, src_mask)
+                lambda x: self.self_attention_block(x, x, x, mask)
             )
 
         x = self.residual_connections[1](
@@ -247,7 +256,7 @@ class Encoder(nn.Module):
         self.layers = layers    # aspetta un EncoderBlock
         self.norm = LayerNormalization()
 
-    def forward(self, x, mask):
+    def forward(self, x, mask=None):
 
         for layer in self.layers:
             x = layer(x, mask)
@@ -290,10 +299,10 @@ class FullTextEncoder(nn.Module):
         # Inizializzazione dell'Encoder finale (che include anche la LayerNorm finale)
         self.encoder = Encoder(blocks)
         
-    def forward(self, x, mask):
+    def forward(self, x, mask=None):
         """
         x: Tensore degli indici dei token testuali. Forma: [Batch, Seq_Len]
-        mask: Maschera per impedire l'attenzione sui token <PAD>.
+        mask: Maschera per impedire l'attenzione sui token <PAD>. (Default: None)
     
         out: Il contesto testuale codificato. Forma: [Batch, Seq_Len, d_model]
         """

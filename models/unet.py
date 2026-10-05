@@ -47,32 +47,31 @@ class Unet(nn.Module):
 
         self.out = OutConv(base_channels, out_channels)
 
-    def forward(self, x, time, context):
+    def forward(self, x, time, context, mask=None):
         t = self.time_mlp(time)
 
-        # ENCODER
-        skip1 = self.attn_inc(self.inc(x, t), context)
-
-        skip2 = self.attn_down1(self.down1(skip1, t), context)
-
+        # ENCODER con propagazione esplicita della maschera
+        skip1 = self.attn_inc(self.inc(x, t), context, mask=mask)
+        skip2 = self.attn_down1(self.down1(skip1, t), context, mask=mask)
+        
         x_down2 = self.down2(skip2, t)
         x_down2 = self.self_attn_down2(x_down2)
-        skip3 = self.attn_down2(x_down2, context)
+        skip3 = self.attn_down2(x_down2, context, mask=mask)
 
         # BOTTLENECK
         bott = self.bott1(skip3, t)
         bott = self.self_attn_bott(bott)
-        bott = self.attn_bott1(bott, context)
+        bott = self.attn_bott1(bott, context, mask=mask)
         bott = self.bott2(bott, t)
 
         # DECODER
         x = self.up1(bott, skip2, t)
         x = self.self_attn_up1(x)
-        x = self.attn_up1(x, context)
+        x = self.attn_up1(x, context, mask=mask)
+        
         x = self.up2(x, skip1, t)
-        x = self.attn_up2(x, context)
+        x = self.attn_up2(x, context, mask=mask)
 
         # OUTPUT
         out = self.out(x)
-
         return out
