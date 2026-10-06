@@ -216,7 +216,7 @@ def train(
                     val_noisy_images = forward_process.add_noise(val_images, val_noise, val_timesteps)
 
                     val_mask = None
-                    with torch.cuda.amp.autocast(enabled=use_amp):
+                    with torch.amp.autocast('cuda', enabled=use_amp):
                         if conditional:
                             pad_token_id = tokenizer.vocab.get("<PAD>", 0)
                             val_mask = (val_tokens != pad_token_id).unsqueeze(1).unsqueeze(2).to(device)
