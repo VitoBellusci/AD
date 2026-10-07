@@ -94,14 +94,40 @@ class AvatarGenerator:
 
     def _load_checkpoint(self, path: str):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        self.unet.load_state_dict(checkpoint['unet_state_dict'])
-        self.text_encoder.load_state_dict(checkpoint['text_encoder_state_dict'])
+        
+        def strip_prefix(state_dict):
+            return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+            
+        unet_weights = strip_prefix(checkpoint['unet_state_dict'])
+        text_encoder_weights = strip_prefix(checkpoint['text_encoder_state_dict'])
+        
+        self.unet.load_state_dict(unet_weights)
+
+        # Gestione retrocompatibilita dimensioni vocabolario tra checkpoint e tokenizer attuale
+        embed_key = None
+        if 'embed.embedding.weight' in text_encoder_weights:
+            embed_key = 'embed.embedding.weight'
+        elif 'embedding.weight' in text_encoder_weights:
+            embed_key = 'embedding.weight'
+
+        if embed_key is not None:
+            ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
+            embed_dim = text_encoder_weights[embed_key].shape[1]
+            if ckpt_vocab_size != self.text_encoder.embedding.num_embeddings:
+                self.text_encoder.embed.embedding = torch.nn.Embedding(
+                    ckpt_vocab_size, embed_dim
+                ).to(self.device)
+
+            if embed_key == 'embedding.weight' and 'embed.embedding.weight' not in text_encoder_weights:
+                text_encoder_weights['embed.embedding.weight'] = text_encoder_weights.pop('embedding.weight')
+
+        self.text_encoder.load_state_dict(text_encoder_weights)
         epoch_str = checkpoint.get('epoch', 'N/A')
         print(f"Checkpoint caricato con successo da '{path}' (epoca: {epoch_str})")
 
     def generate(
         self,
-        prompt: str,
+        prompt: str = "a blue cartoon avatar with round eyes and exaggerated proportions",
         seed: int = 42,
         guidance_scale: float = 3.5,
         num_steps: int = 50,
@@ -119,8 +145,11 @@ class AvatarGenerator:
 
         # 1. Preparazione del testo condizionato
         tokens = self.tokenizer.encode(prompt)
+        max_valid_id = self.text_encoder.embedding.num_embeddings - 1
+        pad_token_id = min(self.tokenizer.vocab.get("<PAD>", 0), max_valid_id)
+        unk_token_id = min(self.tokenizer.vocab.get("<UNK>", 1), max_valid_id)
+        tokens = [t if 0 <= t <= max_valid_id else unk_token_id for t in tokens]
         text_tensor = torch.tensor([tokens] * batch_size, dtype=torch.long, device=self.device)
-        pad_token_id = self.tokenizer.vocab.get("<PAD>", 0)
         mask = (text_tensor != pad_token_id).unsqueeze(1).unsqueeze(2).to(self.device)
 
         # 2. Preparazione del testo incondizionato (Classifier-Free Guidance)
@@ -237,9 +266,9 @@ class AvatarGenerator:
         """
         if ood_prompts is None:
             ood_prompts = [
-                "avatar with face 1, hair 98, eyes 4, glasses 11, and facial hair 3",
-                "avatar with hair 98 and glasses 11",
-                "avatar with hair 98, glasses 11, and shirt 5"
+                "a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard",
+                "a cartoon avatar with wavy hair and no glasses",
+                "a blue cartoon avatar with round eyes and exaggerated proportions"
             ]
 
         print(f"\nAvvio valutazione OOD su {len(ood_prompts)} combinazioni trattenute...")
@@ -262,7 +291,7 @@ def parse_args():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="avatar with face 1, hair 98, eyes 4, glasses 11, and facial hair 3",
+        default="a blue cartoon avatar with round eyes and exaggerated proportions",
         help="Prompt testuale per condizionare la generazione dell'avatar"
     )
     parser.add_argument(

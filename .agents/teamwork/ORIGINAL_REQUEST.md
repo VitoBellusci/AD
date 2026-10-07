@@ -53,3 +53,89 @@ Ensure that after applying the fixes, all scripts (`main.py`, `train.py`, `infer
 - [ ] The `preprocessing` pipeline generates a 4-way split where the OOD test set contains > 0 samples (unlike the original buggy version).
 - [ ] Tokenizer correctly preserves special tokens `<UNK>`, `<SOS>`, and `<EOS>` without clobbering.
 - [ ] The codebase passes an automated test run (e.g. running a single training epoch and a single evaluation step) without throwing exceptions.
+
+
+## 2026-10-07T12:19:01Z
+
+Update the `avatar diffusion` text-to-image pipeline to use semantic text descriptions instead of numerical IDs for avatar attributes. Modify the caption generator to map numerical IDs to descriptive words, update the inference script's default prompt to match the new format, and retrain the diffusion model from scratch to align with the new vocabulary.
+
+Working directory: c:\Users\Admin\Desktop\avatar diffusion
+Integrity mode: development
+Please run autonomously without asking the user for terminal execution consent.
+
+## Requirements
+
+### R1. Semantic Captions
+Update `preprocessing/caption_generator.py` to map numerical attribute IDs (like hair 98, glasses 11) to textual descriptive words (e.g., "blue colors", "round eyes", "spiky hair"). You will need to invent a sensible mapping dictionary for the attributes (e.g. `face_color`, `hair`, `eye_color`, `glasses`, `facial_hair`) so that the generated captions are purely textual.
+
+### R2. Update Inference
+Update `inference.py` to use a purely textual default prompt that matches the new descriptive format (e.g., "a blue cartoon avatar with round eyes and exaggerated proportions", or whatever matches your new template). Update the OOD evaluation prompts similarly.
+
+### R3. Retrain the Model
+Retrain the text encoder and U-Net from scratch by running the training pipeline (`python main.py`). This is required because the vocabulary and token embeddings will completely change. 
+
+## Acceptance Criteria
+
+### Code & Execution
+- [ ] `preprocessing/caption_generator.py` generates captions containing only English words and no numerical category IDs.
+- [ ] The `main.py` training script runs successfully to completion and saves new checkpoints.
+- [ ] `inference.py` successfully generates an image using a purely descriptive text prompt without crashing.
+
+
+## 2026-10-07T12:26:12Z
+
+Modify the avatar diffusion codebase to use natural language descriptive prompts instead of numerical attribute IDs, matching the project requirements.
+
+Working directory: c:\Users\Admin\Desktop\avatar diffusion
+Integrity mode: development
+
+This is a single self-contained fix; keep it small and focused.
+
+## Requirements
+
+### R1. Natural Language Caption Generation
+Modify `preprocessing/caption_generator.py` to map the dataset's numerical metadata values to meaningful natural language descriptors (e.g., mapping face/hair/glasses IDs to descriptive colors, styles, or shapes). The generated training captions must not contain numerical IDs.
+
+### R2. Update Inference Prompts
+Update `inference.py` so that both the default prompt and the `ood_prompts` list in `evaluate_ood_combinations` use natural language (like "a blue cartoon avatar with round eyes and exaggerated proportions") rather than numerical IDs.
+
+### R3. No Terminal Execution
+Do not execute any terminal commands to test the code (as the user is away and cannot consent). Ensure correctness through careful code analysis.
+
+## Acceptance Criteria
+
+### Code Verification
+- [ ] `preprocessing/caption_generator.py` is updated and maps metadata to strings without numerical IDs.
+- [ ] `inference.py` uses only natural language prompts for OOD and defaults.
+- [ ] The code is syntactically valid and type-safe.
+
+
+## 2026-10-07T13:43:57Z
+
+Perform a comprehensive final audit and full-pipeline test of the Avatar Diffusion codebase to ensure all scripts (training, inference, evaluation) work flawlessly together and meet all trace requirements before the final training run.
+
+Working directory: c:\Users\Admin\Desktop\avatar diffusion
+Integrity mode: development
+
+## Requirements
+
+### R1. Full Pipeline Verification
+Run and verify the entire machine learning pipeline end-to-end:
+1. Preprocessing and tokenizer fitting
+2. Training loop (`train.py` for at least 1 epoch or a few steps)
+3. Inference generation (`inference.py`)
+4. Evaluation (`evaluate.py`)
+
+### R2. Natural Language Integration Check
+Ensure the recent shift to natural language prompts (in `caption_generator.py`) integrates seamlessly across the entire system. Verify there are no tensor shape mismatches, missing vocabulary tokens, or `state_dict` loading errors when initializing or resuming the models.
+
+### R3. Bug Fixing and Polish
+Identify and fix any remaining runtime errors, deprecation warnings, or logic bugs discovered during the pipeline test. The codebase must be impeccable and ready for an unattended, long-running final training session.
+
+## Acceptance Criteria
+
+### Execution Checks
+- [ ] `python train.py --epochs 1` (or equivalent short test) runs to completion without crashing.
+- [ ] `python inference.py` runs to completion and saves an image.
+- [ ] `python evaluate.py` runs to completion without `RuntimeError`.
+- [ ] All code modifications maintain strict type safety and architectural constraints.

@@ -121,8 +121,34 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
     reverse_process = DiffusionReverseProcess(num_time_steps=1000, device=device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    unet.load_state_dict(checkpoint['unet_state_dict'])
-    text_encoder.load_state_dict(checkpoint['text_encoder_state_dict'])
+
+    def strip_prefix(state_dict):
+        return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+
+    unet_weights = strip_prefix(checkpoint['unet_state_dict'])
+    text_encoder_weights = strip_prefix(checkpoint['text_encoder_state_dict'])
+
+    unet.load_state_dict(unet_weights)
+
+    # Gestione retrocompatibilita dimensioni vocabolario tra checkpoint e tokenizer attuale
+    embed_key = None
+    if 'embed.embedding.weight' in text_encoder_weights:
+        embed_key = 'embed.embedding.weight'
+    elif 'embedding.weight' in text_encoder_weights:
+        embed_key = 'embedding.weight'
+
+    if embed_key is not None:
+        ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
+        embed_dim = text_encoder_weights[embed_key].shape[1]
+        if ckpt_vocab_size != text_encoder.embedding.num_embeddings:
+            text_encoder.embed.embedding = torch.nn.Embedding(
+                ckpt_vocab_size, embed_dim
+            ).to(device)
+
+        if embed_key == 'embedding.weight' and 'embed.embedding.weight' not in text_encoder_weights:
+            text_encoder_weights['embed.embedding.weight'] = text_encoder_weights.pop('embedding.weight')
+
+    text_encoder.load_state_dict(text_encoder_weights)
     unet.eval()
     text_encoder.eval()
 
@@ -165,7 +191,14 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
                 curr_b = real_images.shape[0]
 
                 # Contesto condizionato e maschera
-                pad_id = tokenizer.vocab.get("<PAD>", 0)
+                max_valid_id = text_encoder.embedding.num_embeddings - 1
+                pad_id = min(tokenizer.vocab.get("<PAD>", 0), max_valid_id)
+                unk_token_id = min(tokenizer.vocab.get("<UNK>", 1), max_valid_id)
+                text_tokens = torch.where(
+                    (text_tokens >= 0) & (text_tokens <= max_valid_id),
+                    text_tokens,
+                    unk_token_id
+                )
                 mask = (text_tokens != pad_id).unsqueeze(1).unsqueeze(2).to(device)
                 cond_ctx = text_encoder(text_tokens, mask)
 
@@ -175,7 +208,8 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
                 uncond_ctx = text_encoder(uncond_tokens, uncond_mask)
 
                 # Reverse sampling loop con intermediate clipping
-                x = torch.randn((curr_b, 3, 64, 64), device=device)
+                h, w = config.resolution
+                x = torch.randn((curr_b, 3, h, w), device=device)
                 for t_idx in reversed(range(1000)):
                     t = torch.full((curr_b,), t_idx, device=device, dtype=torch.long)
                     x = reverse_process.sample(

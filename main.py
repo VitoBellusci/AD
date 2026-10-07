@@ -149,9 +149,10 @@ def main(args=None):
     # 4. Generazione Didascalie e Fit del Tokenizer SOLO sul Training Set
     caption_gen = CaptionGenerator()
     train_texts = [caption_gen.generate(m) for m in train_metadata]
+    canonical_prompts = caption_gen.get_canonical_prompts()
     
     tokenizer = AvatarTokenizer(config)
-    tokenizer.fit(train_texts)
+    tokenizer.fit(canonical_prompts + train_texts)
     tokenizer.save_vocab() # Salviamo il vocabolario per l'inferenza
     
     # 5. Creazione del Dataset e DataLoader con Subset e val_loader (DEF-09, DEF-10)

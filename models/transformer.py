@@ -298,6 +298,18 @@ class FullTextEncoder(nn.Module):
             
         # Inizializzazione dell'Encoder finale (che include anche la LayerNorm finale)
         self.encoder = Encoder(blocks)
+
+    @property
+    def embedding(self) -> nn.Embedding:
+        return self.embed.embedding
+
+    @embedding.setter
+    def embedding(self, new_embedding: nn.Embedding):
+        self.embed.embedding = new_embedding
+
+    @property
+    def d_model(self) -> int:
+        return self.embed.d_model
         
     def forward(self, x, mask=None):
         """
