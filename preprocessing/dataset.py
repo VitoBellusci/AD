@@ -39,26 +39,39 @@ class AvatarDataset(Dataset):
 
         if self.use_ram_cache and len(self.image_paths) > 0:
             from tqdm import tqdm
-            print(f"Pre-caricamento di {len(self.image_paths)} elementi in RAM. Attendere...")
+            from torch.utils.data import DataLoader
+            print(f"Pre-caricamento parallelo di {len(self.image_paths)} elementi in RAM. Attendere...")
             
-            # Usa tensori PyTorch che supportano la memoria condivisa tra i worker
+            self.use_ram_cache = False  # Disabilita temporaneamente per forzare la lettura dal disco
+            
+            # Scopri le dimensioni dei tensori
             first_img = Image.open(self.image_paths[0]).convert("RGB")
             tensor_shape = self.transform(first_img).shape
-            
-            self.cached_images = torch.empty((len(self.image_paths), *tensor_shape), dtype=torch.float32)
-            
             max_seq_len = getattr(self.config, 'max_seq_len', 20)
+            
+            # Alloca la memoria
+            self.cached_images = torch.empty((len(self.image_paths), *tensor_shape), dtype=torch.float32)
             self.cached_captions = torch.empty((len(self.image_paths), max_seq_len), dtype=torch.long)
             
-            for i, (img_path, meta) in enumerate(tqdm(zip(self.image_paths, self.metadata), total=len(self.image_paths), desc="Caching Dataset")):
-                img = Image.open(img_path).convert("RGB")
-                self.cached_images[i] = self.transform(img)
+            # Usiamo PyTorch DataLoader per parallelizzare il caricamento su più processi CPU
+            cache_loader = DataLoader(
+                self, 
+                batch_size=512, 
+                shuffle=False, 
+                num_workers=4,
+                drop_last=False
+            )
+            
+            idx = 0
+            for imgs, caps in tqdm(cache_loader, desc="Caching Parallelo in RAM"):
+                b_size = imgs.size(0)
+                self.cached_images[idx : idx + b_size] = imgs
+                self.cached_captions[idx : idx + b_size] = caps
+                idx += b_size
                 
-                caption_text = self.caption_gen.generate(meta)
-                caption_tokens = self.tokenizer.encode(caption_text)
-                self.cached_captions[i] = torch.tensor(caption_tokens, dtype=torch.long)
-                
-            # Condivide la memoria per l'accesso simultaneo da parte dei worker del DataLoader
+            self.use_ram_cache = True  # Riattiva il cache
+            
+            # Condivide la memoria
             self.cached_images.share_memory_()
             self.cached_captions.share_memory_()
 
