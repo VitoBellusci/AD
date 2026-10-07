@@ -110,8 +110,14 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
         print(f"Avviso: Vocabolario non trovato in '{vocab_path}', utilizzo token speciali di default.")
 
     # 2. Inizializzazione e Caricamento Modelli
-    unet = Unet(in_channels=3, out_channels=3, base_channels=64, context_dim=128).to(device)
-    text_encoder = FullTextEncoder(vocab_size=len(tokenizer.vocab), max_seq_len=config.max_seq_len, d_model=128).to(device)
+    unet = Unet(in_channels=3, out_channels=3, base_channels=96, context_dim=256).to(device)
+    text_encoder = FullTextEncoder(
+        vocab_size=len(tokenizer.vocab), 
+        max_seq_len=config.max_seq_len, 
+        d_model=256,
+        d_ff=512,
+        num_layers=4
+    ).to(device)
     reverse_process = DiffusionReverseProcess(num_time_steps=1000, device=device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)

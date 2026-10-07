@@ -67,14 +67,16 @@ class AvatarGenerator:
         self.text_encoder = FullTextEncoder(
             vocab_size=vocab_size,
             max_seq_len=self.config.max_seq_len,
-            d_model=128
+            d_model=256,
+            d_ff=512,
+            num_layers=4
         ).to(self.device)
 
         self.unet = Unet(
             in_channels=3,
             out_channels=3,
-            base_channels=64,
-            context_dim=128
+            base_channels=96,
+            context_dim=256
         ).to(self.device)
 
         self.reverse_process = DiffusionReverseProcess(num_time_steps=1000, device=self.device)
