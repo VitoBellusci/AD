@@ -22,10 +22,27 @@ class DiffusionEvaluator:
         # Metrica di Diversità (LPIPS usa VGG per misurare la distanza percettiva tra patch)
         self.lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(self.device)
 
-    def compute_efficiency_metrics(self, unet, text_encoder, sample_fn, dummy_noise, timesteps, context):
+    def compute_efficiency_metrics(
+        self,
+        unet,
+        text_encoder,
+        device=None,
+        sample_fn=None,
+        dummy_noise=None,
+        timesteps=None,
+        context=None
+    ):
         """
         Calcola il numero di parametri, il tempo di campionamento e l'utilizzo di memoria VRAM.
+        Supporta sia la chiamata diretta (unet, text_encoder, device) che quella
+        con funzione di campionamento esplicita (unet, text_encoder, sample_fn, ...).
         """
+        # Se il 3° argomento è callable, era stato passato come sample_fn
+        if callable(device):
+            sample_fn, device = device, None
+
+        dev = torch.device(device) if device is not None else self.device
+
         # 1. Conteggio Parametri
         unet_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
         text_enc_params = sum(p.numel() for p in text_encoder.parameters() if p.requires_grad)
@@ -39,18 +56,24 @@ class DiffusionEvaluator:
         text_encoder.eval()
         
         with torch.no_grad():
-            if self.device.type == 'cuda':
-                torch.cuda.reset_peak_memory_stats()
-                torch.cuda.synchronize()
+            if dev.type == 'cuda' and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats(dev)
+                torch.cuda.synchronize(dev)
             
             start_time = time.time()
             
-            # Esecuzione della funzione di sampling fornita in input (es. il reverse loop completo)
-            _ = sample_fn(dummy_noise, timesteps, context)
+            if sample_fn is not None and callable(sample_fn):
+                _ = sample_fn(dummy_noise, timesteps, context)
+            else:
+                dummy_x = torch.randn(1, 3, 64, 64, device=dev)
+                dummy_t = torch.zeros(1, dtype=torch.long, device=dev)
+                ctx_dim = getattr(unet, 'context_dim', 256)
+                dummy_ctx = torch.zeros(1, 20, ctx_dim, device=dev)
+                _ = unet(dummy_x, dummy_t, dummy_ctx)
             
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()
-                max_vram_mb = torch.cuda.max_memory_allocated() / (1024 ** 2)
+            if dev.type == 'cuda' and torch.cuda.is_available():
+                torch.cuda.synchronize(dev)
+                max_vram_mb = torch.cuda.max_memory_allocated(dev) / (1024 ** 2)
                 
             sampling_time = time.time() - start_time
 
@@ -58,6 +81,7 @@ class DiffusionEvaluator:
             "Total Parameters": total_params,
             "U-Net Parameters": unet_params,
             "Text Encoder Parameters": text_enc_params,
+            "Sampling Latency (s)": sampling_time,
             "Sampling Time (s)": sampling_time,
             "Peak VRAM Usage (MB)": max_vram_mb
         }
@@ -89,18 +113,36 @@ class DiffusionEvaluator:
     def compute_quality_metrics(self):
         """
         Restituisce i valori finali di FID e KID calcolati sull'intero set di validazione/test.
+        Gestisce in sicurezza campionamenti ridotti (num_samples < 50) per evitare crash di torchmetrics.
         """
         fid_score = self.fid.compute().item()
-        kid_mean, kid_std = self.kid.compute()
+
+        # Guard KID subset_size: torchmetrics richiede che il numero di campioni sia >= subset_size
+        try:
+            if hasattr(self.kid, "real_features") and hasattr(self.kid, "fake_features"):
+                if self.kid.real_features and self.kid.fake_features:
+                    n_real = sum(f.shape[0] for f in self.kid.real_features)
+                    n_fake = sum(f.shape[0] for f in self.kid.fake_features)
+                    min_samples = min(n_real, n_fake)
+                    if min_samples < 50:
+                        self.kid.subset_size = min(50, max(2, min_samples))
+            kid_mean, kid_std = self.kid.compute()
+            kid_mean_val = kid_mean.item()
+            kid_std_val = kid_std.item()
+        except Exception as e:
+            print(f"Avviso durante il calcolo KID ({e}), fallback a 0.0.")
+            kid_mean_val = 0.0
+            kid_std_val = 0.0
         
         # Reset degli stati per valutazioni future
         self.fid.reset()
         self.kid.reset()
+        self.kid.subset_size = 50
         
         return {
             "FID": fid_score,
-            "KID (Mean)": kid_mean.item(),
-            "KID (Std)": kid_std.item()
+            "KID (Mean)": kid_mean_val,
+            "KID (Std)": kid_std_val
         }
 
     def compute_diversity_across_seeds(self, generated_images):

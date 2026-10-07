@@ -95,6 +95,7 @@ def parse_args():
     parser.add_argument("--cfg_drop_rate", type=float, default=0.1, help="CFG dropout rate (default: 0.1)")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory for checkpoints")
     parser.add_argument("--resume", type=str, default=None, help="Explicit checkpoint path to resume from")
+    parser.add_argument("--max_steps", type=int, default=None, help="Max steps per epoch for fast dummy/verification run")
     return parser
 
 def main(args=None):
@@ -149,10 +150,9 @@ def main(args=None):
     # 4. Generazione Didascalie e Fit del Tokenizer SOLO sul Training Set
     caption_gen = CaptionGenerator()
     train_texts = [caption_gen.generate(m) for m in train_metadata]
-    canonical_prompts = caption_gen.get_canonical_prompts()
     
     tokenizer = AvatarTokenizer(config)
-    tokenizer.fit(canonical_prompts + train_texts)
+    tokenizer.fit(train_texts)
     tokenizer.save_vocab() # Salviamo il vocabolario per l'inferenza
     
     # 5. Creazione del Dataset e DataLoader con Subset e val_loader (DEF-09, DEF-10)
@@ -215,13 +215,41 @@ def main(args=None):
         # Carica il checkpoint mappandolo sul device corretto
         checkpoint = torch.load(latest_checkpoint, map_location=device, weights_only=False)
         
-        # Ripristina i pesi della rete
-        unet.load_state_dict(checkpoint['unet_state_dict'])
-        text_encoder.load_state_dict(checkpoint['text_encoder_state_dict'])
+        # Ripristina i pesi della rete (rimuovendo eventuale prefisso module.)
+        def strip_prefix(state_dict):
+            return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+
+        unet_weights = strip_prefix(checkpoint['unet_state_dict'])
+        text_encoder_weights = strip_prefix(checkpoint['text_encoder_state_dict'])
+
+        unet.load_state_dict(unet_weights)
+
+        # Gestione retrocompatibilita dimensioni vocabolario tra checkpoint e tokenizer attuale
+        embed_key = None
+        if 'embed.embedding.weight' in text_encoder_weights:
+            embed_key = 'embed.embedding.weight'
+        elif 'embedding.weight' in text_encoder_weights:
+            embed_key = 'embedding.weight'
+
+        if embed_key is not None:
+            ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
+            embed_dim = text_encoder_weights[embed_key].shape[1]
+            if ckpt_vocab_size != text_encoder.embedding.num_embeddings:
+                text_encoder.embed.embedding = torch.nn.Embedding(
+                    ckpt_vocab_size, embed_dim
+                ).to(device)
+
+            if embed_key == 'embedding.weight' and 'embed.embedding.weight' not in text_encoder_weights:
+                text_encoder_weights['embed.embedding.weight'] = text_encoder_weights.pop('embedding.weight')
+
+        text_encoder.load_state_dict(text_encoder_weights)
         
-        # Ripristina lo stato dell'ottimizzatore e dello scheduler
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        # Ripristina lo stato dell'ottimizzatore e dello scheduler in modo sicuro
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        except Exception as opt_err:
+            print(f"Avviso: Impossibile ripristinare stato ottimizzatore ({opt_err}), proseguo con nuovo ottimizzatore.")
         
         # Ripristina i seed per la perfetta riproducibilità del rumore
         if 'torch_rng_state' in checkpoint:
@@ -229,10 +257,20 @@ def main(args=None):
         if 'torch_cuda_rng_state' in checkpoint and checkpoint['torch_cuda_rng_state'] is not None:
             if torch.cuda.is_available():
                 cuda_rng_states = [state.cpu() for state in checkpoint['torch_cuda_rng_state']]
-                torch.cuda.set_rng_state_all(cuda_rng_states)           
+                try:
+                    if len(cuda_rng_states) == torch.cuda.device_count():
+                        torch.cuda.set_rng_state_all(cuda_rng_states)
+                    elif len(cuda_rng_states) > 0 and torch.cuda.device_count() > 0:
+                        torch.cuda.set_rng_state(cuda_rng_states[0])
+                except (RuntimeError, ValueError) as rng_err:
+                    print(f"Avviso: Impossibile ripristinare CUDA RNG state ({rng_err}), proseguo con RNG predefinito.")
         # Imposta l'epoca da cui ripartire
         start_epoch = checkpoint['epoch']
-        print(f"Ripresa del training dall'epoca {start_epoch + 1}")
+        if parsed_args.resume is None and parsed_args.epochs <= start_epoch:
+            print(f"Epoche richieste ({parsed_args.epochs}) <= epoca checkpoint ({start_epoch}). Avvio da epoca 0 per completare {parsed_args.epochs} epoca/che.")
+            start_epoch = 0
+        else:
+            print(f"Ripresa del training dall'epoca {start_epoch + 1}")
     except (FileNotFoundError, IndexError):
         print("Nessun checkpoint trovato. Inizio addestramento da zero.")
 
@@ -256,7 +294,8 @@ def main(args=None):
         start_epoch=start_epoch,
         conditional=conditional_mode,
         cfg_drop_rate=parsed_args.cfg_drop_rate,
-        lr=parsed_args.lr
+        lr=parsed_args.lr,
+        max_steps=parsed_args.max_steps
     )
 
 if __name__ == "__main__":

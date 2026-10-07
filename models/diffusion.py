@@ -5,37 +5,46 @@ import math
 class DiffusionScheduler:
     """
     Classe base per gestire lo scheduling del rumore.
-    Implementa il Cosine Scheduler per evitare che il rumore
-    venga aggiunto troppo velocemente, preservando l'informazione dell'immagine.
+    Supporta sia il Cosine Scheduler (Nichol & Dhariwal, 2021) che il Linear Scheduler (Ho et al., 2020)
+    per gestire la varianza del rumore.
     """
-    def __init__(self, num_time_steps=1000, s=0.008, device="cpu"):
+    def __init__(self, num_time_steps=1000, s=0.008, schedule_type="cosine", beta_start=1e-4, beta_end=0.02, device="cpu"):
         self.num_time_steps = num_time_steps
         self.device = torch.device(device)
+        self.schedule_type = schedule_type
 
-        # Calcolo di alpha_bar usando la formula del cosine scheduler:
-        # f(t) = cos(((t/T + s) / (1 + s)) * (pi/2))^2
-        steps = torch.arange(num_time_steps + 1, dtype=torch.float32, device=self.device)
-        f_t = torch.cos(((steps / num_time_steps + s) / (1 + s)) * (math.pi / 2))**2
+        if schedule_type == "cosine":
+            # Calcolo di alpha_bar usando la formula del cosine scheduler:
+            # f(t) = cos(((t/T + s) / (1 + s)) * (pi/2))^2
+            steps = torch.arange(num_time_steps + 1, dtype=torch.float32, device=self.device)
+            f_t = torch.cos(((steps / num_time_steps + s) / (1 + s)) * (math.pi / 2))**2
 
-        # Questo tensore viene normalizzato, assicurando che allo step t = 0 il valore sia esattamente 1.0.
-        # Esso contiene la frazione totale del segnale originale, sopravvissuta dopo t iniezioni di rumore
-        ab_full = f_t / f_t[0]    
+            # Questo tensore viene normalizzato, assicurando che allo step t = 0 il valore sia esattamente 1.0.
+            # Esso contiene la frazione totale del segnale originale, sopravvissuta dopo t iniezioni di rumore
+            ab_full = f_t / f_t[0]    
 
-        # Prendiamo gli step da 1 a T (escludendo lo step 0)
-        self.alpha_bars = ab_full[1:].to(self.device)
+            # Prendiamo gli step da 1 a T (escludendo lo step 0)
+            self.alpha_bars = ab_full[1:].to(self.device)
 
-        # alpha_bar_t = alpha_bar_{t-1} * alpha_t  => alpha_t = alpha_bar_t / alpha_bar_{t-1}
-        # Escludendo l'ultimo elemento, si prendono tutti i valori fino a T - 1
-        ab_prev = ab_full[: -1].to(self.device)
-        alphas = self.alpha_bars / ab_prev
-        betas = 1 - alphas    # betas contiene le quote di informazione visiva che vengono cancellate e sostituite dal rumore per ogni time step
+            # alpha_bar_t = alpha_bar_{t-1} * alpha_t  => alpha_t = alpha_bar_t / alpha_bar_{t-1}
+            # Escludendo l'ultimo elemento, si prendono tutti i valori fino a T - 1
+            ab_prev = ab_full[:-1].to(self.device)
+            alphas = self.alpha_bars / ab_prev
+            betas = 1 - alphas    # betas contiene le quote di informazione visiva cancellate
 
-        # Clipping delle beta per evitare instabilità numeriche (singolarità vicino a t=T)
-        self.betas = torch.clamp(betas, max=0.999).to(self.device)
+            # Clipping delle beta per evitare instabilità numeriche (singolarità vicino a t=T)
+            self.betas = torch.clamp(betas, max=0.999).to(self.device)
 
-        # Ricalcolo di alphas e alpha_bars dopo il clipping per coerenza matematica
-        self.alphas = 1 - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+            # Ricalcolo di alphas e alpha_bars dopo il clipping per coerenza matematica
+            self.alphas = 1 - self.betas
+            self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        elif schedule_type == "linear":
+            # Linear beta schedule di Ho et al. (2020) (1e-4 a 0.02)
+            self.betas = torch.linspace(beta_start, beta_end, num_time_steps, dtype=torch.float32, device=self.device)
+            self.alphas = 1.0 - self.betas
+            self.alpha_bars = torch.cumprod(self.alphas, dim=0)
+        else:
+            raise ValueError(f"Tipo di schedule non supportato: '{schedule_type}'. Scegliere 'cosine' o 'linear'.")
 
         # Pre-calcolo per il Forward Process (add_noise)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)

@@ -127,7 +127,7 @@ class AvatarGenerator:
 
     def generate(
         self,
-        prompt: str = "a blue cartoon avatar with round eyes and exaggerated proportions",
+        prompt: str = "a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard",
         seed: int = 42,
         guidance_scale: float = 3.5,
         num_steps: int = 50,
@@ -268,7 +268,7 @@ class AvatarGenerator:
             ood_prompts = [
                 "a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard",
                 "a cartoon avatar with wavy hair and no glasses",
-                "a blue cartoon avatar with round eyes and exaggerated proportions"
+                "a cartoon avatar with pale skin, wavy hair, blue eyes, no glasses, and light stubble"
             ]
 
         print(f"\nAvvio valutazione OOD su {len(ood_prompts)} combinazioni trattenute...")
@@ -291,7 +291,7 @@ def parse_args():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="a blue cartoon avatar with round eyes and exaggerated proportions",
+        default="a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard",
         help="Prompt testuale per condizionare la generazione dell'avatar"
     )
     parser.add_argument(

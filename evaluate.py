@@ -91,7 +91,75 @@ def load_eval_dataset(data_dir: str, config: PreprocessingConfig, tokenizer: Ava
         config=config
     )
 
-def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50, num_samples: int = 200):
+def sample_batch(
+    unet,
+    reverse_process,
+    cond_ctx,
+    uncond_ctx,
+    mask,
+    uncond_mask,
+    shape,
+    device,
+    num_steps=50,
+    guidance_scale=3.5
+):
+    """
+    Reverse sampling con supporto sia per DDPM standard (1000 step)
+    che per campionamento deterministico accelerato DDIM (< 1000 step).
+    """
+    batch_size = shape[0]
+    total_timesteps = reverse_process.num_time_steps
+    x = torch.randn(shape, device=device)
+
+    if num_steps >= total_timesteps:
+        for t_idx in reversed(range(total_timesteps)):
+            t = torch.full((batch_size,), t_idx, device=device, dtype=torch.long)
+            noise_free = (t_idx == 0)
+            x = reverse_process.sample(
+                model=unet, x=x, t=t,
+                context=cond_ctx, uncond_context=uncond_ctx,
+                mask=mask, uncond_mask=uncond_mask,
+                guidance_scale=guidance_scale, noise_free=noise_free,
+                clip_denoised=True
+            )
+    else:
+        timesteps = torch.linspace(0, total_timesteps - 1, steps=num_steps).long().to(device)
+        reversed_timesteps = timesteps.flip(0)
+
+        for i in range(num_steps):
+            t_val = reversed_timesteps[i].item()
+            t = torch.full((batch_size,), t_val, device=device, dtype=torch.long)
+            t_prev_val = reversed_timesteps[i + 1].item() if (i + 1 < num_steps) else None
+
+            if guidance_scale > 1.0 and cond_ctx is not None and uncond_ctx is not None:
+                x_input = torch.cat([x, x], dim=0)
+                t_input = torch.cat([t, t], dim=0)
+                context_input = torch.cat([cond_ctx, uncond_ctx], dim=0)
+                mask_input = torch.cat([mask, uncond_mask], dim=0)
+                all_noise = unet(x_input, t_input, context=context_input, mask=mask_input)
+                eps_cond, eps_uncond = torch.chunk(all_noise, 2, dim=0)
+                predicted_noise = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+            else:
+                predicted_noise = unet(x, t, context=cond_ctx, mask=mask)
+
+            sqrt_alpha_bar_t = reverse_process.sqrt_alpha_bars[t].to(device)[:, None, None, None]
+            sqrt_one_minus_alpha_bar_t = reverse_process.sqrt_one_minus_alpha_bars[t].to(device)[:, None, None, None]
+
+            pred_x0 = (x - sqrt_one_minus_alpha_bar_t * predicted_noise) / sqrt_alpha_bar_t
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+
+            if t_prev_val is None:
+                x = pred_x0
+            else:
+                t_prev = torch.full((batch_size,), t_prev_val, device=device, dtype=torch.long)
+                alpha_bar_prev = reverse_process.alpha_bars[t_prev].to(device)[:, None, None, None]
+                sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
+                sqrt_one_minus_alpha_bar_prev = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev, min=0.0))
+                x = sqrt_alpha_bar_prev * pred_x0 + sqrt_one_minus_alpha_bar_prev * predicted_noise
+
+    return x
+
+def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50, num_samples: int = 200, num_steps: int = 50):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"--- Avvio Valutazione Rigorosa su Device: {device} ---")
     print(f"Caricamento checkpoint: {checkpoint_path}")
@@ -169,7 +237,70 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
 
     evaluator = DiffusionEvaluator(device=device)
 
-    # 4. Loop di Valutazione per ciascuna partizione
+    # 4. Metriche di Efficienza Computazionale
+    print("\n==========================================")
+    print("Metriche di Efficienza Computazionale:")
+    print("==========================================")
+    eff_metrics = evaluator.compute_efficiency_metrics(unet, text_encoder, device)
+    print(f"  Parametri Totali: {eff_metrics['Total Parameters']:,}")
+    print(f"  Parametri U-Net: {eff_metrics['U-Net Parameters']:,}")
+    print(f"  Parametri Text Encoder: {eff_metrics['Text Encoder Parameters']:,}")
+    print(f"  Latenza di Campionamento: {eff_metrics['Sampling Latency (s)']:.4f} s")
+    print(f"  Picco VRAM: {eff_metrics['Peak VRAM Usage (MB)']:.2f} MB")
+
+    # 5. Valutazione Diversità tra Seed (Pairwise LPIPS)
+    print("\n==========================================")
+    print("Valutazione Diversità tra Seed (Pairwise LPIPS):")
+    print("==========================================")
+    diversity_prompts = [
+        "a cartoon avatar with porcelain skin, short hair, blue eyes, round glasses, and no facial hair",
+        "a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard"
+    ]
+    diversity_scores = []
+    with torch.no_grad():
+        for p_idx, prompt_text in enumerate(diversity_prompts):
+            tokens = tokenizer.encode(prompt_text)
+            max_valid_id = text_encoder.embedding.num_embeddings - 1
+            pad_id = min(tokenizer.vocab.get("<PAD>", 0), max_valid_id)
+            unk_token_id = min(tokenizer.vocab.get("<UNK>", 1), max_valid_id)
+            tokens = [t if 0 <= t <= max_valid_id else unk_token_id for t in tokens]
+
+            p_tokens = torch.tensor([tokens], dtype=torch.long, device=device)
+            p_mask = (p_tokens != pad_id).unsqueeze(1).unsqueeze(2).to(device)
+            p_cond_ctx = text_encoder(p_tokens, p_mask)
+
+            p_uncond_tok = torch.full_like(p_tokens, pad_id)
+            p_uncond_mask = torch.ones_like(p_mask)
+            p_uncond_ctx = text_encoder(p_uncond_tok, p_uncond_mask)
+
+            seed_imgs = []
+            for s in [1000, 1001, 1002, 1003]:
+                torch.manual_seed(s)
+                if device.type == "cuda":
+                    torch.cuda.manual_seed_all(s)
+                h, w = config.resolution
+                gen_img = sample_batch(
+                    unet=unet,
+                    reverse_process=reverse_process,
+                    cond_ctx=p_cond_ctx,
+                    uncond_ctx=p_uncond_ctx,
+                    mask=p_mask,
+                    uncond_mask=p_uncond_mask,
+                    shape=(1, 3, h, w),
+                    device=device,
+                    num_steps=num_steps
+                )
+                seed_imgs.append(gen_img)
+
+            stacked_seeds = torch.cat(seed_imgs, dim=0)
+            div = evaluator.compute_diversity_across_seeds(stacked_seeds)
+            diversity_scores.append(div)
+            print(f"  Prompt [{p_idx + 1}]: \"{prompt_text[:45]}...\" -> Pairwise LPIPS: {div:.4f}")
+
+    if diversity_scores:
+        print(f"  Diversità Media Pairwise LPIPS: {sum(diversity_scores)/len(diversity_scores):.4f}")
+
+    # 6. Loop di Valutazione Qualitativa per ciascuna partizione (IID vs OOD)
     for split_name, indices in splits_to_eval.items():
         if len(indices) == 0:
             print(f"ATTENZIONE: Partizione '{split_name}' vuota! Salto.")
@@ -207,19 +338,20 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
                 uncond_mask = torch.ones_like(mask)
                 uncond_ctx = text_encoder(uncond_tokens, uncond_mask)
 
-                # Reverse sampling loop con intermediate clipping
+                # Reverse sampling loop con DDPM / DDIM accelerato
                 h, w = config.resolution
-                x = torch.randn((curr_b, 3, h, w), device=device)
-                for t_idx in reversed(range(1000)):
-                    t = torch.full((curr_b,), t_idx, device=device, dtype=torch.long)
-                    x = reverse_process.sample(
-                        model=unet, x=x, t=t,
-                        context=cond_ctx, uncond_context=uncond_ctx,
-                        mask=mask, uncond_mask=uncond_mask,
-                        guidance_scale=3.5, clip_denoised=True
-                    )
-
-                fake_images = x  # [-1.0, 1.0]
+                fake_images = sample_batch(
+                    unet=unet,
+                    reverse_process=reverse_process,
+                    cond_ctx=cond_ctx,
+                    uncond_ctx=uncond_ctx,
+                    mask=mask,
+                    uncond_mask=uncond_mask,
+                    shape=(curr_b, 3, h, w),
+                    device=device,
+                    num_steps=num_steps,
+                    guidance_scale=3.5
+                )
 
                 # Accumulo batch obbligatorio per FID e KID prima di .compute()
                 evaluator.update_quality_metrics(real_images, fake_images)
@@ -238,8 +370,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default=None, help="Percorso del file checkpoint (.pt)")
     parser.add_argument("--batch_size", type=int, default=50, help="Batch size per la generazione e valutazione")
     parser.add_argument("--num_samples", type=int, default=100, help="Numero massimo di campioni da valutare per partizione")
+    parser.add_argument("--num_steps", type=int, default=50, help="Numero di step di campionamento (DDIM se < 1000, DDPM se >= 1000)")
     parser.add_argument("--data_dir", type=str, default="data", help="Directory dei dati del dataset")
     args = parser.parse_args()
 
     ckpt = resolve_checkpoint(explicit_path=args.checkpoint)
-    evaluate(ckpt, data_dir=args.data_dir, batch_size=args.batch_size, num_samples=args.num_samples)
+    evaluate(ckpt, data_dir=args.data_dir, batch_size=args.batch_size, num_samples=args.num_samples, num_steps=args.num_steps)

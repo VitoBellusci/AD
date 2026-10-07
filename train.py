@@ -94,7 +94,8 @@ def train(
     start_epoch: int = 0,
     conditional: bool = True,
     cfg_drop_rate: float = 0.1,
-    lr: float = 1e-4
+    lr: float = 1e-4,
+    max_steps: Optional[int] = None
 ):
     """
     Ciclo di addestramento unificato per:
@@ -125,6 +126,7 @@ def train(
 
     for epoch in range(start_epoch, epochs):
         epoch_loss = 0.0
+        step = 0
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
 
         for images, text_tokens in progress_bar:
@@ -192,11 +194,15 @@ def train(
                 optimizer.step()
 
             epoch_loss += loss.item()
+            step += 1
             progress_bar.set_postfix({"MSE Loss": f"{loss.item():.4f}"})
+            if max_steps is not None and step >= max_steps:
+                print(f"Raggiunto limite di {max_steps} step per epoca.")
+                break
 
         # Riduce il learning rate
         scheduler.step()
-        avg_loss = epoch_loss / max(1, len(dataloader))
+        avg_loss = epoch_loss / max(1, step)
         print(f"Epoch {epoch+1} completata | Loss Media: {avg_loss:.4f}")
 
         # Validation loss tracking (DEF-10)
@@ -205,6 +211,7 @@ def train(
             unet.eval()
             text_encoder.eval()
             val_loss = 0.0
+            val_step = 0
             with torch.no_grad():
                 for val_images, val_tokens in val_loader:
                     val_images = val_images.to(device)
@@ -231,8 +238,11 @@ def train(
                         val_step_loss = criterion(val_pred_noise, val_noise)
 
                     val_loss += val_step_loss.item()
+                    val_step += 1
+                    if max_steps is not None and val_step >= max_steps:
+                        break
 
-            avg_val_loss = val_loss / len(val_loader)
+            avg_val_loss = val_loss / max(1, val_step)
             print(f"Epoch {epoch+1} | Validation Loss Media: {avg_val_loss:.4f}")
             unet.train()
             text_encoder.train()
