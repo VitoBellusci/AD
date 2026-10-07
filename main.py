@@ -167,17 +167,24 @@ def main(args=None):
     
     batch_size = parsed_args.batch_size
 
-    pin_memory = True if device == 'cuda' else False
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        pin_memory=pin_memory,
-        num_workers=0,
-        drop_last=(len(train_dataset) >= batch_size)
+        drop_last=(len(train_dataset) >= batch_size),
+        num_workers=4,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True
     )
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=0)
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
     
     # 6. Inizializzazione Modelli Architetturali
     vocab_size = len(tokenizer.vocab)
