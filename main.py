@@ -90,10 +90,10 @@ def parse_args():
     parser.add_argument("--unconditional", dest="conditional", action="store_false",
                         help="Train unconditional baseline (DEF-11)")
     parser.add_argument("--epochs", type=int, default=50, help="Total training epochs (default: 50)")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size (default: 32)")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 32)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
     parser.add_argument("--cfg_drop_rate", type=float, default=0.1, help="CFG dropout rate (default: 0.1)")
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory for checkpoints")
+    parser.add_argument("--checkpoint_dir", type=str, default="/kaggle/working", help="Directory for checkpoints")
     parser.add_argument("--resume", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--max_steps", type=int, default=None, help="Max steps per epoch for fast dummy/verification run")
     return parser
@@ -119,8 +119,8 @@ def main(args=None):
     config = PreprocessingConfig("./preprocessing/preprocessing_config.json")
 
     # CARICAMENTO METADATI GOOGLE CARTOON SET
-    image_dir = "./data/cartoonset100k_jpg" 
-    csv_path = "./data/meta/cartoon_image_attributes.csv"
+    image_dir = "/kaggle/input/datasets/vitobellu/cartoon-set/archive/cartoonset100k_jpg" 
+    csv_path = "/kaggle/input/datasets/vitobellu/cartoon-set/meta/meta/cartoon_image_attributes.csv"
 
     raw_metadata = []
     image_paths = []
@@ -166,13 +166,18 @@ def main(args=None):
     train_dataset = Subset(dataset, train_indices)
     
     batch_size = parsed_args.batch_size
+
+    pin_memory = True if device == 'cuda' else False
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
+        pin_memory=pin_memory,
+        num_workers=0,
         drop_last=(len(train_dataset) >= batch_size)
     )
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin_memory, num_workers=0)
     
     # 6. Inizializzazione Modelli Architetturali
     vocab_size = len(tokenizer.vocab)
@@ -190,6 +195,9 @@ def main(args=None):
         base_channels=96, 
         context_dim=256
     ).to(device)
+
+    unet = torch.nn.DataParallel(unet)
+    text_encoder = torch.nn.DataParallel(text_encoder)
     
     # 7. Inizializzazione Processo di Diffusione (Forward)
     forward_process = DiffusionForwardProcess(num_time_steps=1000, device=device)

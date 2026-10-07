@@ -268,3 +268,12 @@ def train(
 
         torch.save(checkpoint_dict, checkpoint_path)
         print(f"Checkpoint salvato: {checkpoint_path}")
+
+        # Elimina il checkpoint dell'epoca precedente per non riempire il disco di Kaggle
+        old_checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
+        if os.path.exists(old_checkpoint_path):
+            try:
+                os.remove(old_checkpoint_path)
+                print(f"Rimosso vecchio checkpoint per risparmiare spazio: {old_checkpoint_path}")
+            except OSError:
+                pass
