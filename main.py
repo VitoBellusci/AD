@@ -17,15 +17,17 @@ from preprocessing.caption_generator import CaptionGenerator
 from models.transformer import FullTextEncoder
 from models.unet import Unet
 from models.diffusion import DiffusionForwardProcess
-from train import train, set_seed
+from train import train, set_seed, create_ema_model, strip_prefix
 
 def resolve_checkpoint(checkpoint_dir: str = "checkpoints", explicit_path: str = None) -> str:
     """
     Risolve il checkpoint in modo deterministico ordinando per indice numerico di epoca,
     evitando la fragilità non portabile di os.path.getctime (Blueprint 3.2, DEF-20).
     """
-    if explicit_path and os.path.exists(explicit_path):
-        return explicit_path
+    if explicit_path:
+        if os.path.exists(explicit_path):
+            return explicit_path
+        raise FileNotFoundError(f"Checkpoint specificato non trovato: '{explicit_path}'")
 
     pattern = os.path.join(checkpoint_dir, "checkpoint_epoch_*.pt")
     available = glob.glob(pattern)
@@ -90,12 +92,23 @@ def parse_args():
     parser.add_argument("--unconditional", dest="conditional", action="store_false",
                         help="Train unconditional baseline (DEF-11)")
     parser.add_argument("--epochs", type=int, default=50, help="Total training epochs (default: 50)")
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 32)")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
     parser.add_argument("--cfg_drop_rate", type=float, default=0.1, help="CFG dropout rate (default: 0.1)")
-    parser.add_argument("--checkpoint_dir", type=str, default="/kaggle/working", help="Directory for checkpoints")
+    default_ckpt_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "checkpoints"
+    parser.add_argument("--checkpoint_dir", type=str, default=default_ckpt_dir, help="Directory for checkpoints")
     parser.add_argument("--resume", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--max_steps", type=int, default=None, help="Max steps per epoch for fast dummy/verification run")
+    parser.add_argument("--use_ema", dest="use_ema", action="store_true", default=True,
+                        help="Enable Exponential Moving Average (EMA) for UNet (default: True)")
+    parser.add_argument("--no_ema", dest="use_ema", action="store_false",
+                        help="Disable Exponential Moving Average (EMA) for UNet")
+    parser.add_argument("--ema_decay", type=float, default=0.9999,
+                        help="Exponential Moving Average decay factor (default: 0.9999)")
+    parser.add_argument("--data_dir", type=str, default="data", help="Directory containing dataset")
+    parser.add_argument("--image_dir", type=str, default=None, help="Explicit directory for cartoonset images")
+    parser.add_argument("--csv_path", type=str, default=None, help="Explicit path to cartoon_image_attributes.csv")
+    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader num_workers (default: 4)")
     return parser
 
 def main(args=None):
@@ -118,9 +131,38 @@ def main(args=None):
     # 2. Inizializzazione Configurazione
     config = PreprocessingConfig("./preprocessing/preprocessing_config.json")
 
-    # CARICAMENTO METADATI GOOGLE CARTOON SET
-    image_dir = "/kaggle/input/datasets/vitobellu/cartoon-set/archive/cartoonset100k_jpg" 
-    csv_path = "/kaggle/input/datasets/vitobellu/cartoon-set/meta/meta/cartoon_image_attributes.csv"
+    # CARICAMENTO METADATI GOOGLE CARTOON SET (supporto locale e Kaggle)
+    csv_path = parsed_args.csv_path
+    if not csv_path or not os.path.exists(csv_path):
+        candidate_csvs = [
+            "/kaggle/input/datasets/vitobellu/cartoon-set/meta/meta/cartoon_image_attributes.csv",
+            os.path.join(parsed_args.data_dir, "meta", "cartoon_image_attributes.csv"),
+            os.path.join(parsed_args.data_dir, "cartoon_image_attributes.csv"),
+            "data/meta/cartoon_image_attributes.csv",
+        ]
+        for c in candidate_csvs:
+            if os.path.exists(c):
+                csv_path = c
+                break
+
+    if not csv_path or not os.path.exists(csv_path):
+        raise FileNotFoundError("File attributi CSV non trovato. Specificare --csv_path o --data_dir.")
+
+    image_dir = parsed_args.image_dir
+    if not image_dir or not os.path.exists(image_dir):
+        candidate_img_dirs = [
+            "/kaggle/input/datasets/vitobellu/cartoon-set/archive/cartoonset100k_jpg",
+            os.path.join(parsed_args.data_dir, "cartoonset100k_jpg"),
+            parsed_args.data_dir,
+            "data/cartoonset100k_jpg",
+        ]
+        for d in candidate_img_dirs:
+            if os.path.isdir(d):
+                image_dir = d
+                break
+
+    if not image_dir or not os.path.exists(image_dir):
+        raise FileNotFoundError("Directory immagini non trovata. Specificare --image_dir o --data_dir.")
 
     raw_metadata = []
     image_paths = []
@@ -168,23 +210,24 @@ def main(args=None):
     
     batch_size = parsed_args.batch_size
 
-
+    use_workers = parsed_args.num_workers > 0
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         drop_last=(len(train_dataset) >= batch_size),
-        num_workers=4,
-        pin_memory=True,
-        prefetch_factor=2,
-        persistent_workers=True
+        num_workers=parsed_args.num_workers,
+        pin_memory=(device == "cuda"),
+        prefetch_factor=2 if use_workers else None,
+        persistent_workers=use_workers
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=batch_size, 
         shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        num_workers=parsed_args.num_workers,
+        pin_memory=(device == "cuda"),
+        persistent_workers=use_workers
     )
     
     # 6. Inizializzazione Modelli Architetturali
@@ -203,6 +246,12 @@ def main(args=None):
         base_channels=96, 
         context_dim=256
     ).to(device)
+
+    # Inizializzazione EMA UNet (R1)
+    ema_unet = None
+    if parsed_args.use_ema:
+        ema_unet = create_ema_model(unet, decay=parsed_args.ema_decay, device=device)
+        print(f"EMA UNet inizializzato con decay={parsed_args.ema_decay}")
 
     unet = torch.nn.DataParallel(unet)
     text_encoder = torch.nn.DataParallel(text_encoder)
@@ -231,14 +280,18 @@ def main(args=None):
         # Carica il checkpoint mappandolo sul device corretto
         checkpoint = torch.load(latest_checkpoint, map_location=device, weights_only=False)
         
-        # Ripristina i pesi della rete (rimuovendo eventuale prefisso module.)
-        def strip_prefix(state_dict):
-            return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-
+        # Ripristina i pesi della rete (rimuovendo ricorsivamente eventuale prefisso module.)
         unet_weights = strip_prefix(checkpoint['unet_state_dict'])
         text_encoder_weights = strip_prefix(checkpoint['text_encoder_state_dict'])
 
-        unet.load_state_dict(unet_weights)
+        raw_unet = unet
+        while hasattr(raw_unet, 'module'):
+            raw_unet = raw_unet.module
+        raw_text_encoder = text_encoder
+        while hasattr(raw_text_encoder, 'module'):
+            raw_text_encoder = raw_text_encoder.module
+
+        raw_unet.load_state_dict(unet_weights)
 
         # Gestione retrocompatibilita dimensioni vocabolario tra checkpoint e tokenizer attuale
         embed_key = None
@@ -250,15 +303,15 @@ def main(args=None):
         if embed_key is not None:
             ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
             embed_dim = text_encoder_weights[embed_key].shape[1]
-            if ckpt_vocab_size != text_encoder.embedding.num_embeddings:
-                text_encoder.embed.embedding = torch.nn.Embedding(
+            if ckpt_vocab_size != raw_text_encoder.embedding.num_embeddings:
+                raw_text_encoder.embed.embedding = torch.nn.Embedding(
                     ckpt_vocab_size, embed_dim
                 ).to(device)
 
             if embed_key == 'embedding.weight' and 'embed.embedding.weight' not in text_encoder_weights:
                 text_encoder_weights['embed.embedding.weight'] = text_encoder_weights.pop('embedding.weight')
 
-        text_encoder.load_state_dict(text_encoder_weights)
+        raw_text_encoder.load_state_dict(text_encoder_weights)
         
         # Ripristina lo stato dell'ottimizzatore e dello scheduler in modo sicuro
         try:
@@ -266,6 +319,71 @@ def main(args=None):
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         except Exception as opt_err:
             print(f"Avviso: Impossibile ripristinare stato ottimizzatore ({opt_err}), proseguo con nuovo ottimizzatore.")
+
+        # Ripristino pesi EMA UNet (R2)
+        if ema_unet is not None:
+            raw_ema = ema_unet
+            while hasattr(raw_ema, 'module'):
+                raw_ema = raw_ema.module
+
+            avg_model = ema_unet
+            while hasattr(avg_model, 'module') and not hasattr(avg_model, 'n_averaged'):
+                avg_model = avg_model.module
+
+            ema_loaded = False
+            # 1. Tentativo di ripristino diretto dello stato completo AveragedModel
+            if 'ema_state_dict' in checkpoint:
+                try:
+                    avg_model.load_state_dict(checkpoint['ema_state_dict'])
+                    ema_loaded = True
+                    print("Ripristinato stato EMA UNet da ema_state_dict.")
+                except Exception as ema_err:
+                    print(f"Avviso durante ripristino diretto ema_state_dict ({ema_err}), fallback su pesi unwrapped.")
+
+            # 2. Se il ripristino diretto fallisce o se è presente solo ema_unet_state_dict
+            if not ema_loaded:
+                weights_to_load = None
+                if 'ema_unet_state_dict' in checkpoint:
+                    weights_to_load = strip_prefix(checkpoint['ema_unet_state_dict'])
+                    weights_to_load = {k: v for k, v in weights_to_load.items() if k != 'n_averaged'}
+                    print("Ripristino pesi EMA UNet da ema_unet_state_dict.")
+                elif 'ema_state_dict' in checkpoint:
+                    weights_to_load = strip_prefix(checkpoint['ema_state_dict'])
+                    weights_to_load = {k: v for k, v in weights_to_load.items() if k != 'n_averaged'}
+                    print("Ripristino pesi EMA UNet da ema_state_dict su modulo unwrapped.")
+
+                if weights_to_load is not None:
+                    try:
+                        raw_ema.load_state_dict(weights_to_load)
+                        ema_loaded = True
+                    except Exception as load_err:
+                        print(f"Avviso durante caricamento pesi EMA su modulo base ({load_err}).")
+
+                # Ripristina il contatore n_averaged
+                if ema_loaded and hasattr(avg_model, 'n_averaged'):
+                    if 'ema_n_averaged' in checkpoint:
+                        n_val = checkpoint['ema_n_averaged']
+                        n_int = int(n_val.item() if hasattr(n_val, 'item') else n_val)
+                    elif 'ema_state_dict' in checkpoint and 'n_averaged' in checkpoint['ema_state_dict']:
+                        n_val = checkpoint['ema_state_dict']['n_averaged']
+                        n_int = int(n_val.item() if hasattr(n_val, 'item') else n_val)
+                    else:
+                        n_int = 1
+
+                    if isinstance(avg_model.n_averaged, torch.Tensor):
+                        avg_model.n_averaged.fill_(n_int)
+                    else:
+                        avg_model.n_averaged = n_int
+
+            # 3. Fallback per checkpoint legacy senza stato EMA
+            if not ema_loaded:
+                raw_ema.load_state_dict(raw_unet.state_dict())
+                if hasattr(avg_model, 'n_averaged'):
+                    if isinstance(avg_model.n_averaged, torch.Tensor):
+                        avg_model.n_averaged.fill_(0)
+                    else:
+                        avg_model.n_averaged = 0
+                print("Nessun peso EMA valido trovato nel checkpoint. Inizializzato EMA dai pesi attivi di UNet (n_averaged=0).")
         
         # Ripristina i seed per la perfetta riproducibilità del rumore
         if 'torch_rng_state' in checkpoint:
@@ -311,7 +429,10 @@ def main(args=None):
         conditional=conditional_mode,
         cfg_drop_rate=parsed_args.cfg_drop_rate,
         lr=parsed_args.lr,
-        max_steps=parsed_args.max_steps
+        max_steps=parsed_args.max_steps,
+        ema_unet=ema_unet,
+        ema_decay=parsed_args.ema_decay,
+        use_ema=parsed_args.use_ema
     )
 
 if __name__ == "__main__":

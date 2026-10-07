@@ -1,7 +1,7 @@
-# BRIEFING — 2026-10-07T15:02:00Z
+# BRIEFING — 2026-10-07T22:22:00Z
 
 ## Mission
-Perform a comprehensive final code review, functional verification, and fix-up of the Avatar Diffusion project. Ensure it strictly meets all assignment requirements, is completely bug-free, and is fully ready for the definitive training run.
+Integrate Exponential Moving Average (EMA) for the UNet model in the PyTorch diffusion training loop (`train.py` and `main.py`) to prevent mode collapse, ensuring checkpointing and resumption support.
 
 ## 🔒 My Identity
 - Archetype: sentinel
@@ -10,6 +10,8 @@ Perform a comprehensive final code review, functional verification, and fix-up o
 - Victory Auditor: [to be spawned on victory claim]
 - Active Orchestrator: ebf019cd-ccf0-44f1-97b0-e8b532cc9e09 (orchestrator_6)
 - Active Victory Auditor: f5b5d73a-4ecc-47ba-b76a-6ba084cf72aa (victory_auditor_4)
+- Active Orchestrator: 681a8de2-6ccf-4cb3-a317-106d36163fb9 (swe_2)
+- Active Victory Auditor: 32ced9ea-7563-4969-b240-ee5eb1caf44e (victory_auditor_5)
 
 ## 🔒 Key Constraints
 - No technical decisions — relay only
@@ -27,11 +29,13 @@ Perform a comprehensive final code review, functional verification, and fix-up o
 - Ensure from-scratch compliance (no pre-trained models/weights)
 - Ensure compositional split isolates attribute combination from training
 - Verify functional pipeline via dummy training, reverse sampling, and evaluation metrics
+- Routing decision: SWE Light path (teamwork_preview_swe) for single self-contained EMA integration fix
+- Victory audit is MANDATORY and BLOCKING before reporting completion
 
 ## User Context
-- **Last user request**: Comprehensive final code review, functional verification, and fix-up of Avatar Diffusion project meeting all assignment requirements (R1-R4) and acceptance criteria.
+- **Last user request**: Integrate Exponential Moving Average (EMA) for the UNet model in the PyTorch diffusion training loop (`train.py` and `main.py`) to prevent mode collapse. Fast dummy training run completes, checkpoint contains EMA state dict alongside model weights, and resume works.
 - **Pending clarifications**: none
-- **Delivered results**: Complete remediation applied and verified across all assignment criteria (R1-R4). Independent post-victory audit completed with VICTORY CONFIRMED. Cleaned up all background tasks and subagents.
+- **Delivered results**: Complete EMA integration implemented, audited across 3 review rounds, verified by independent victory audit (VICTORY CONFIRMED), all tasks and subagents cleaned up.
 
 ## Project Status
 - **Phase**: complete
@@ -42,10 +46,9 @@ Perform a comprehensive final code review, functional verification, and fix-up o
 - **Retry count**: 0
 
 ## Artifact Index
-- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\ORIGINAL_REQUEST.md` — Verbatim user request record
-- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\orchestrator_6\` — Project orchestrator workspace
-- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\orchestrator_6\PROJECT.md` — Project architecture & feature inventory
-- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\orchestrator_6\GATE_STATUS.md` — Gate status report
-- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\victory_auditor_4\` — Independent victory auditor workspace
-- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\victory_auditor_4\audit_report.md` — Victory audit report
-- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\sentinel\handoff.md` — Sentinel final handoff
+- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\ORIGINAL_REQUEST.md` — Authoritative user request record
+- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\swe_2\DISPATCH.md` — SWE Light dispatch instructions
+- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\swe_2\handoff.md` — Orchestrator handoff report
+- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\victory_auditor_5\DISPATCH.md` — Victory audit dispatch
+- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\victory_auditor_5\handoff.md` — Independent victory audit report
+- `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\sentinel\handoff.md` — Sentinel final handoff record

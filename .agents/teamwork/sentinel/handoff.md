@@ -1,35 +1,64 @@
-# Handoff Report — Sentinel Final Verification & Victory Confirmation
+# Sentinel Final Handoff Report: UNet Exponential Moving Average (EMA) Integration
 
-## Observation
-User requested a comprehensive final code review, functional verification, and fix-up of the Avatar Diffusion project. Requirements encompassed:
-- R1. Preprocessing & Compositional Split: resizing to 64x64, normalization to [-1, 1], deterministic natural language captions without numerical IDs, train-only vocabulary of 149 tokens without synthetic leakage, and 4-way compositional split isolating held-out combination `(hair=98, glasses=11)` into `test_ood` (458 samples) with 0% overlap in `train` (79,634 samples).
-- R2. From-Scratch Models: zero pretrained models/weights (no CLIP, T5, BERT, diffusers, torchvision pretrained weights, or VAEs). Custom 4-layer Transformer text encoder (2.14M params) and 3-level pixel-space U-Net denoiser (24.52M params), totaling 26.66M parameters under the "Tiny" parameter budget.
-- R3. Diffusion Components & Conditioning: spatial cross-attention with padding masks, Nichol-Dhariwal cosine & Ho et al. linear noise schedules, forward analytical noising, reverse sampling with dynamic range clipping [-1.0, 1.0] and CFG (w=3.5), multi-GPU RNG guards, and checkpoint restoration.
-- R4. Evaluation Metrics: dynamic calculations of Total / Component Parameters, Sampling Latency, Peak VRAM, pairwise LPIPS diversity across seeds, and FID / KID across ordinary in-distribution and compositional out-of-distribution splits.
-- Functional Verification: short dummy training, inference reverse sampling batch generation, and evaluation script execution all passing with exit code 0.
+**Project**: Avatar Diffusion — UNet Exponential Moving Average (EMA) Integration  
+**Date**: October 8, 2026  
+**Status**: COMPLETE (VICTORY CONFIRMED)  
+**Sentinel Working Directory**: `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\sentinel`
 
-## Logic Chain
-1. Orchestrator `orchestrator_6` executed the full Project Pattern lifecycle:
-   - Phase 0: 3 parallel survey subagents mapped assignment criteria (`spec_miner_survey_6_1`), data pipeline (`explorer_survey_6_2`), and model/eval architectures (`explorer_survey_6_3`).
-   - Phase 1: Consolidated findings into `PROJECT.md` tracking all 28 features across 4 pillars.
-   - Phase 2: Dispatched `worker_remediation_6_1`, completing all 7 implementation remediations and passing 4 verification runs.
-   - Phase 3 & 4: Dispatched 5 gate agents (`reviewer_gate_6_1`, `reviewer_gate_6_2`, `challenger_gate_6_1`, `challenger_gate_6_2`, `auditor_integrity_6_1`), achieving unanimous APPROVE and CLEAN verdicts.
-2. Upon orchestrator's completion claim, Sentinel enforced mandatory post-victory audit protocol and dispatched independent auditor `victory_auditor_4`.
-3. `victory_auditor_4` performed independent 3-phase verification:
-   - Phase A: Provenance and commit history verified authentic.
-   - Phase B: AST and static scans confirmed zero external pretrained weights or shortcuts; verified 100% disjoint splits and 149-token training-only vocabulary.
-   - Phase C: Independently executed 4 live CLI commands (`test_gate_6_2_verification.py`, `train.py --epochs 1 --max_steps 3`, `inference.py --num_steps 10`, `evaluate.py --num_samples 10`), achieving 100% test passes with exit code 0 and matching claimed metrics.
-4. Independent verdict received: **VICTORY CONFIRMED**.
-5. Sentinel cleaned up all monitoring crons (tasks task-34 and task-36 killed) and all subagents killed.
+---
 
-## Caveats
-- New training sessions should be launched with `python train.py` or `python main.py`; checkpoints from earlier epochs with legacy vocabulary sizes are dynamically accommodated by embedding resizing logic if loaded.
-- KID computation dynamically scales subset size for small sample batches ($N < 50$), but for benchmark-grade publications $N \ge 50$ is recommended.
+## 1. Observation
+- **User Request**: Integrate Exponential Moving Average (EMA) for the UNet model in the PyTorch diffusion training loop (`train.py` and `main.py`) to prevent mode collapse during training.
+- **Requirements & Acceptance Criteria**:
+  - **R1**: Integrate a robust, pre-built PyTorch EMA library to maintain EMA UNet weights.
+  - **R2**: Update training loop for per-step EMA updates and dual-state checkpointing (`unet_state_dict` + `ema_unet_state_dict` / `ema_state_dict`); ensure seamless training resumption.
+  - **Acceptance Criteria**: Fast dummy training completes (`--max_steps 5`), checkpoints contain EMA state dict alongside regular weights, and training resumes without errors.
+- **Execution Trajectory**:
+  - Routed to SWE Light (`teamwork_preview_swe`, workspace `.agents/teamwork/swe_2/`).
+  - Managed 1 implementer (`implementer_1`) and 3 sequential adversarial review rounds (`reviewer_1`, `reviewer_2`, `reviewer_3`).
+  - Independent post-victory audit dispatched (`victory_auditor_5`, workspace `.agents/teamwork/victory_auditor_5/`) and delivered a unanimous `VICTORY CONFIRMED` verdict across all 3 audit phases.
 
-## Conclusion
-The Avatar Diffusion codebase strictly satisfies all assignment requirements, is bug-free, and is fully ready for the definitive training run.
+---
 
-## Verification Method
-- Independent post-victory audit report: `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\victory_auditor_4\audit_report.md`
-- Gate status report: `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\orchestrator_6\GATE_STATUS.md`
-- Project architecture and feature matrix: `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\orchestrator_6\PROJECT.md`
+## 2. Logic Chain & Technical Substance
+1. **EMA Library Selection & Integration (R1)**:
+   - Integrated PyTorch's native `torch.optim.swa_utils.AveragedModel` with `get_ema_multi_avg_fn` via helper `create_ema_model` in `train.py`.
+   - Uses PyTorch's hardware-accelerated vectorized in-place `torch._foreach_lerp_` kernel for zero external dependencies and optimal training throughput.
+   - EMA weights are explicitly moved to the target device with `requires_grad=False` to preserve memory.
+2. **Training Loop & Optimization Updates (R2)**:
+   - Synchronized EMA weight updates in `train.py` immediately following optimizer steps.
+   - Added AMP `GradScaler` protection: if inf/NaN gradients occur and the optimizer step is skipped, the EMA update is safely bypassed to preserve numerical synchronization.
+3. **Checkpoint Serialization & Dual-State Preservation (R2)**:
+   - Checkpoints serialize `unet_state_dict` (active model weights), `ema_unet_state_dict` (direct loadable state dict of the averaged model), `ema_state_dict` (`AveragedModel` state dict), and `ema_n_averaged` (step counter).
+4. **Hierarchical Resumption Architecture (R2)**:
+   - Implemented 3-tier resilient resumption in `main.py`:
+     - *Tier 1*: Full `AveragedModel` restoration from `ema_state_dict`.
+     - *Tier 2*: Raw state dict restoration from `ema_unet_state_dict` with `n_averaged` step restoration.
+     - *Tier 3*: Fail-soft fallback from `unet_state_dict` for legacy or corrupted checkpoints.
+   - Handled recursive prefix stripping (`module.` and `_orig_mod.`) for single-GPU, DataParallel, DDP, and compiled models.
+5. **Adversarial Hardening Across Review Rounds**:
+   - Fixed silent no-op bug in multi-tensor EMA averaging by enforcing in-place `torch._foreach_lerp_`.
+   - Fixed `UnboundLocalError` on `text_encoder_weights` in `inference.py` and `evaluate.py`.
+   - Hardened `module.n_averaged` unwrapping in container/wrapper hierarchies.
+   - Added CLI arguments `--use_ema`, `--no_ema`, and `--ema_decay` across training, evaluation, and inference entrypoints.
+
+---
+
+## 3. Caveats & Operating Guidance
+- **CLI Default Paths**: `main.py` default dataset paths are configured for Kaggle environments; for local execution, pass `--data_dir`, `--image_dir`, or `--csv_path` as needed.
+- **Inference Mode**: Downstream generation scripts (`inference.py` and `evaluate.py`) default to using EMA weights when present, but accept `--no_ema` if raw active weights are specifically requested.
+
+---
+
+## 4. Conclusion
+The Exponential Moving Average (EMA) implementation for the UNet diffusion model is completely implemented, rigorously verified across 3 review rounds and 33 programmatic tests, validated by an independent Victory Auditor with a `VICTORY CONFIRMED` verdict, and fully ready for production usage.
+
+---
+
+## 5. Verification Method & Evidence
+- **Independent Audit Verdict**: `VICTORY CONFIRMED` (`victory_auditor_5`)
+  - **Phase A (Timeline & Provenance)**: PASS (authentic multi-round development lifecycle).
+  - **Phase B (Integrity Forensics)**: PASS (zero stubs, zero hardcoding, zero circular verification).
+  - **Phase C (Independent Test Execution)**: PASS (33/33 tests passing with full mathematical concordance).
+- **Audit Report**: `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\victory_auditor_5\handoff.md`
+- **Teardown**: All background monitoring crons and active subagents cleanly terminated.

@@ -182,3 +182,32 @@ Ensure the evaluation code correctly calculates and logs image quality metrics (
 
 ---
 *Next: when approved → delegate via invoke_subagent (see Delegation Protocol)*
+
+
+## 2026-10-07T21:21:49Z
+
+# Teamwork Project Prompt — Draft
+
+> Status: Launched
+> Goal: Craft prompt → get user approval → delegate to teamwork_preview
+> Requested team: A small focused team (one implementer + adversarial reviewer).
+
+This is a single self-contained fix; keep it small and focused. Integrate Exponential Moving Average (EMA) for the UNet model in the PyTorch diffusion training loop (`train.py` and `main.py`) to prevent mode collapse.
+
+Working directory: c:\Users\Admin\Desktop\avatar diffusion
+Integrity mode: demo
+
+## Requirements
+
+### R1. Implement EMA using pre-built libraries
+Integrate a robust, existing PyTorch EMA library (e.g., via pip) to maintain an Exponential Moving Average of the UNet model's weights during training.
+
+### R2. Update Training and Checkpointing
+Modify the training loop to update the EMA weights after each optimization step. Ensure that both the active UNet weights and the EMA UNet weights are saved in the training checkpoints, and that training can be resumed correctly.
+
+## Acceptance Criteria
+
+### Execution & Integration
+- [ ] A fast dummy training run (using `--max_steps 5` or similar) completes successfully without crashing.
+- [ ] The saved checkpoint file contains the EMA state dictionary alongside the regular model weights.
+- [ ] Training can be successfully resumed from the newly generated checkpoint without errors.

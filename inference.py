@@ -46,12 +46,13 @@ class AvatarGenerator:
     immagini da prompt testuali specificando un seed, e la valutazione di prompt OOD.
     Supporta campionamento accelerato deterministico DDIM (Song et al., 2020) per inferenza rapida.
     """
-    def __init__(self, config_path: str, checkpoint_path: str = None, device: str = None):
+    def __init__(self, config_path: str, checkpoint_path: str = None, device: str = None, use_ema: bool = True):
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
+        self.use_ema = use_ema
         self.config = PreprocessingConfig(config_path)
 
         # Inizializzazione Tokenizer con guardia contro vocab.json mancante
@@ -96,32 +97,72 @@ class AvatarGenerator:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         def strip_prefix(state_dict):
-            return {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+            cleaned = {}
+            for k, v in state_dict.items():
+                changed = True
+                while changed:
+                    changed = False
+                    if k.startswith('module.'):
+                        k = k[7:]
+                        changed = True
+                    elif k.startswith('_orig_mod.'):
+                        k = k[10:]
+                        changed = True
+                cleaned[k] = v
+            return cleaned
             
-        unet_weights = strip_prefix(checkpoint['unet_state_dict'])
-        text_encoder_weights = strip_prefix(checkpoint['text_encoder_state_dict'])
-        
-        self.unet.load_state_dict(unet_weights)
+        unet_loaded = False
+        if self.use_ema:
+            if 'ema_unet_state_dict' in checkpoint:
+                try:
+                    unet_weights = strip_prefix(checkpoint['ema_unet_state_dict'])
+                    unet_weights = {k: v for k, v in unet_weights.items() if k != 'n_averaged'}
+                    self.unet.load_state_dict(unet_weights)
+                    unet_loaded = True
+                    print("Caricamento pesi EMA UNet (ema_unet_state_dict) per inferenza.")
+                except Exception as e:
+                    print(f"Avviso: Caricamento ema_unet_state_dict fallito ({e}), tento fallback.")
+
+            if not unet_loaded and 'ema_state_dict' in checkpoint:
+                try:
+                    unet_weights = strip_prefix(checkpoint['ema_state_dict'])
+                    unet_weights = {k: v for k, v in unet_weights.items() if k != 'n_averaged'}
+                    self.unet.load_state_dict(unet_weights)
+                    unet_loaded = True
+                    print("Caricamento pesi EMA UNet (ema_state_dict) per inferenza.")
+                except Exception as e:
+                    print(f"Avviso: Caricamento ema_state_dict fallito ({e}), tento fallback.")
+
+        if not unet_loaded:
+            unet_weights = strip_prefix(checkpoint['unet_state_dict'])
+            unet_weights = {k: v for k, v in unet_weights.items() if k != 'n_averaged'}
+            self.unet.load_state_dict(unet_weights)
+            if self.use_ema:
+                print("Nessun peso EMA valido trovato; caricamento pesi regolari UNet per inferenza.")
+            else:
+                print("Caricamento pesi regolari UNet per inferenza (--no_ema attivo).")
 
         # Gestione retrocompatibilita dimensioni vocabolario tra checkpoint e tokenizer attuale
-        embed_key = None
-        if 'embed.embedding.weight' in text_encoder_weights:
-            embed_key = 'embed.embedding.weight'
-        elif 'embedding.weight' in text_encoder_weights:
-            embed_key = 'embedding.weight'
+        if 'text_encoder_state_dict' in checkpoint and checkpoint['text_encoder_state_dict']:
+            text_encoder_weights = strip_prefix(checkpoint['text_encoder_state_dict'])
+            embed_key = None
+            if 'embed.embedding.weight' in text_encoder_weights:
+                embed_key = 'embed.embedding.weight'
+            elif 'embedding.weight' in text_encoder_weights:
+                embed_key = 'embedding.weight'
 
-        if embed_key is not None:
-            ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
-            embed_dim = text_encoder_weights[embed_key].shape[1]
-            if ckpt_vocab_size != self.text_encoder.embedding.num_embeddings:
-                self.text_encoder.embed.embedding = torch.nn.Embedding(
-                    ckpt_vocab_size, embed_dim
-                ).to(self.device)
+            if embed_key is not None:
+                ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
+                embed_dim = text_encoder_weights[embed_key].shape[1]
+                if ckpt_vocab_size != self.text_encoder.embedding.num_embeddings:
+                    self.text_encoder.embed.embedding = torch.nn.Embedding(
+                        ckpt_vocab_size, embed_dim
+                    ).to(self.device)
 
-            if embed_key == 'embedding.weight' and 'embed.embedding.weight' not in text_encoder_weights:
-                text_encoder_weights['embed.embedding.weight'] = text_encoder_weights.pop('embedding.weight')
+                if embed_key == 'embedding.weight' and 'embed.embedding.weight' not in text_encoder_weights:
+                    text_encoder_weights['embed.embedding.weight'] = text_encoder_weights.pop('embedding.weight')
 
-        self.text_encoder.load_state_dict(text_encoder_weights)
+            self.text_encoder.load_state_dict(text_encoder_weights)
         epoch_str = checkpoint.get('epoch', 'N/A')
         print(f"Checkpoint caricato con successo da '{path}' (epoca: {epoch_str})")
 
@@ -336,6 +377,19 @@ def parse_args():
         default=False,
         help="Esegui la suite di valutazione composizionale Out-Of-Distribution (OOD)"
     )
+    parser.add_argument(
+        "--use_ema",
+        dest="use_ema",
+        action="store_true",
+        default=True,
+        help="Utilizza i pesi EMA UNet se disponibili nel checkpoint (default: True)"
+    )
+    parser.add_argument(
+        "--no_ema",
+        dest="use_ema",
+        action="store_false",
+        help="Disabilita l'uso dei pesi EMA e carica i pesi regolari di UNet"
+    )
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -349,7 +403,8 @@ if __name__ == "__main__":
     print("--- Inizializzazione Avatar Diffusion Inference ---")
     generator = AvatarGenerator(
         config_path=config_path,
-        checkpoint_path=checkpoint_path
+        checkpoint_path=checkpoint_path,
+        use_ema=args.use_ema
     )
 
     if args.test_ood:
