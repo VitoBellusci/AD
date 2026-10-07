@@ -160,7 +160,8 @@ def main(args=None):
         image_paths=image_paths,
         metadata=raw_metadata,
         tokenizer=tokenizer,
-        config=config
+        config=config,
+        use_ram_cache=True
     )
     val_dataset = Subset(dataset, val_indices)
     train_dataset = Subset(dataset, train_indices)
