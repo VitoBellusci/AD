@@ -274,10 +274,10 @@ class FullTextEncoder(nn.Module):
         self, 
         vocab_size: int, 
         max_seq_len: int, 
-        d_model: int = 128, 
-        num_layers: int = 3, 
+        d_model: int = 256, 
+        num_layers: int = 4, 
         heads: int = 4, 
-        d_ff: int = 256, 
+        d_ff: int = 512, 
         dropout: float = 0.1
     ):
         super().__init__()

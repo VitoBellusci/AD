@@ -21,7 +21,7 @@ class Unet(nn.Module):
         )
 
         self.inc = DoubleConv(in_channels, base_channels, time_emb_dim)
-        self.attn_inc = SpatialCrossAttention(base_channels, context_dim)
+        # Rimossa attn_inc a 64x64 per ottimizzazione SOTA (meno spreco di memoria)
 
         self.down1 = Down(base_channels, base_channels * 2, time_emb_dim)
         self.attn_down1 = SpatialCrossAttention(base_channels * 2, context_dim)
@@ -43,7 +43,7 @@ class Unet(nn.Module):
         self.self_attn_up1 = SpatialSelfAttention(base_channels * 2)
         self.attn_up1 = SpatialCrossAttention(base_channels * 2, context_dim)
         self.up2 = Up(base_channels * 3, base_channels, time_emb_dim, bilinear=True)
-        self.attn_up2 = SpatialCrossAttention(base_channels, context_dim)
+        # Rimossa attn_up2 a 64x64 per ottimizzazione SOTA (meno spreco di memoria)
 
         self.out = OutConv(base_channels, out_channels)
 
@@ -51,7 +51,7 @@ class Unet(nn.Module):
         t = self.time_mlp(time)
 
         # ENCODER con propagazione esplicita della maschera
-        skip1 = self.attn_inc(self.inc(x, t), context, mask=mask)
+        skip1 = self.inc(x, t)  # Solo convoluzione (Niente attenzione spaziale a 64x64)
         skip2 = self.attn_down1(self.down1(skip1, t), context, mask=mask)
         
         x_down2 = self.down2(skip2, t)
@@ -70,7 +70,7 @@ class Unet(nn.Module):
         x = self.attn_up1(x, context, mask=mask)
         
         x = self.up2(x, skip1, t)
-        x = self.attn_up2(x, context, mask=mask)
+        # Solo interpolazione e conv (Niente attenzione spaziale a 64x64)
 
         # OUTPUT
         out = self.out(x)

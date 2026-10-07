@@ -178,14 +178,16 @@ def main(args=None):
     text_encoder = FullTextEncoder(
         vocab_size=vocab_size, 
         max_seq_len=config.max_seq_len,
-        d_model=128
+        d_model=256,
+        d_ff=512,
+        num_layers=4
     ).to(device)
     
     unet = Unet(
         in_channels=3, 
         out_channels=3, 
-        base_channels=64, 
-        context_dim=128
+        base_channels=96, 
+        context_dim=256
     ).to(device)
     
     # 7. Inizializzazione Processo di Diffusione (Forward)

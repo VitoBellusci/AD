@@ -96,17 +96,16 @@ class Down(nn.Module):
     def __init__(self, in_channels, out_channels, time_emb_dim):
         super().__init__()
 
-        # Applica un'operazione di Max Pooling che scorre l'immagine con una griglia 2x2. Seleziona solo il valore di attivazione 
-        # massimo all'interno di ogni quadrante, riducendo esattamente della metà l'altezza e la larghezza del tensore. 
-        # Questo concentra l'informazione sulle feature dominanti, scartando il rumore posizionale.
-
-        self.maxpool = nn.MaxPool2d(2)
+        # Sostituzione di MaxPool2d con Strided Convolution (Miglioria SOTA per evitare artefatti visivi).
+        # Invece di scartare il 75% dei pixel in modo hard e non differenziabile, 
+        # una convoluzione con stride=2 impara attivamente il modo migliore per 
+        # fondere le informazioni locali durante la riduzione della risoluzione.
+        self.downsample = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1)
 
         self.conv = DoubleConv(in_channels, out_channels, time_emb_dim)
 
     def forward(self, x, t_emb):
-        x = self.maxpool(x)
-
+        x = self.downsample(x)
         return self.conv(x, t_emb)
 
 
