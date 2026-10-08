@@ -1,3 +1,4 @@
+import sys
 import torch
 import csv
 import os
@@ -115,8 +116,12 @@ def main(args=None):
     # 1. Parse argomenti CLI e configurazione (DEF-11)
     parser = parse_args()
     if args is None:
+        if "--epochs" not in sys.argv and "--max_steps" in sys.argv:
+            parser.set_defaults(epochs=1)
         parsed_args, _ = parser.parse_known_args()
     elif isinstance(args, list):
+        if "--epochs" not in args and "--max_steps" in args:
+            parser.set_defaults(epochs=1)
         parsed_args = parser.parse_args(args)
     elif isinstance(args, argparse.Namespace):
         parsed_args = args

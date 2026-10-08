@@ -211,3 +211,36 @@ Modify the training loop to update the EMA weights after each optimization step.
 - [ ] A fast dummy training run (using `--max_steps 5` or similar) completes successfully without crashing.
 - [ ] The saved checkpoint file contains the EMA state dictionary alongside the regular model weights.
 - [ ] Training can be successfully resumed from the newly generated checkpoint without errors.
+
+
+## 2026-10-08T13:43:56Z
+
+# Teamwork Project Prompt — Draft
+
+> Status: Ready for launch — awaiting user approval
+> Goal: Craft prompt → get user approval → delegate to teamwork_preview
+> Requested team: small focused team
+
+This is a single self-contained modification; keep it small and focused. 
+Modify the existing avatar diffusion model to use v-prediction (velocity target) instead of epsilon-prediction. 
+
+Working directory: c:\Users\Admin\Desktop\avatar diffusion
+Integrity mode: demo
+
+## Requirements
+
+### R1. Update Training Target
+In `train.py`, modify the loss calculation to use the velocity target (`v_target`) instead of the noise target. The velocity target is defined as `sqrt_alpha_bar_t * noise - sqrt_one_minus_alpha_bar_t * original`.
+
+### R2. Update Reverse Process
+In `models/diffusion.py`, update the `DiffusionReverseProcess.sample` method to assume the model outputs velocity (`v`). Reconstruct both `pred_x0` and the noise from the predicted velocity for the reverse step.
+
+### R3. Update DDIM Sampling
+In `evaluate.py` (`sample_batch`) and `inference.py` (`generate`), update the sampling loops to correctly reconstruct `pred_x0` and the noise from the model's velocity output.
+
+## Acceptance Criteria
+
+### Execution & Verification
+- [ ] The agent team must run a quick test using `python train.py --max_steps 2` and confirm it completes without shape mismatches or crashes.
+- [ ] The agent team must run a quick test using `python inference.py --num_steps 2` (or similar minimal config) and confirm it generates an output tensor/image without crashing.
+- [ ] The mathematical formulas for extracting `x0` and `epsilon` from `v` must mathematically match the definition of v-parameterization.

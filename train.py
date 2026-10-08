@@ -334,9 +334,13 @@ def train(
                         text_encoder, tokenizer, batch_size, text_tokens.shape[1], device
                     )
 
-                # 5. Predizione del rumore target con supporto AMP (DEF-14) e maschera esplicita (DEF-04)
-                predicted_noise = unet(noisy_images, timesteps, context, mask=mask)
-                loss = criterion(predicted_noise, noise)
+                # Calcolo del target di velocita (v_target) per v-prediction (R1)
+                # Formula: v_target = sqrt_alpha_bar_t * noise - sqrt_one_minus_alpha_bar_t * original
+                v_target = forward_process.get_velocity(images, noise, timesteps)
+
+                # 5. Predizione del target di velocita con supporto AMP (DEF-14) e maschera esplicita (DEF-04)
+                predicted_v = unet(noisy_images, timesteps, context, mask=mask)
+                loss = criterion(predicted_v, v_target)
 
             # 6. Backward pass con GradScaler (se AMP attivo) e decoupled gradient clipping (DEF-19)
             step_executed = True
@@ -413,8 +417,10 @@ def train(
                                 text_encoder, tokenizer, val_b, val_tokens.shape[1], device
                             )
 
-                        val_pred_noise = unet(val_noisy_images, val_timesteps, val_context, mask=val_mask)
-                        val_step_loss = criterion(val_pred_noise, val_noise)
+                        val_v_target = forward_process.get_velocity(val_images, val_noise, val_timesteps)
+
+                        val_pred_v = unet(val_noisy_images, val_timesteps, val_context, mask=val_mask)
+                        val_step_loss = criterion(val_pred_v, val_v_target)
 
                     val_loss += val_step_loss.item()
                     val_step += 1
@@ -471,3 +477,13 @@ def train(
         ema_unet.eval()
 
     return ema_unet
+
+
+if __name__ == "__main__":
+    import sys
+    from main import main, parse_args
+    parser = parse_args()
+    if "--epochs" not in sys.argv and "--max_steps" in sys.argv:
+        parser.set_defaults(epochs=1)
+    parsed_args, _ = parser.parse_known_args()
+    main(parsed_args)

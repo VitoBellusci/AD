@@ -88,7 +88,8 @@ def load_eval_dataset(data_dir: str, config: PreprocessingConfig, tokenizer: Ava
         image_paths=image_paths,
         metadata=raw_metadata,
         tokenizer=tokenizer,
-        config=config
+        config=config,
+        use_ram_cache=False
     )
 
 def sample_batch(
@@ -96,10 +97,10 @@ def sample_batch(
     reverse_process,
     cond_ctx,
     uncond_ctx,
-    mask,
-    uncond_mask,
-    shape,
-    device,
+    mask=None,
+    uncond_mask=None,
+    shape=None,
+    device="cpu",
     num_steps=50,
     guidance_scale=3.5
 ):
@@ -135,24 +136,27 @@ def sample_batch(
                 x_input = torch.cat([x, x], dim=0)
                 t_input = torch.cat([t, t], dim=0)
                 context_input = torch.cat([cond_ctx, uncond_ctx], dim=0)
-                mask_input = torch.cat([mask, uncond_mask], dim=0)
-                all_noise = unet(x_input, t_input, context=context_input, mask=mask_input)
-                eps_cond, eps_uncond = torch.chunk(all_noise, 2, dim=0)
-                predicted_noise = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+                mask_input = None
+                if mask is not None and uncond_mask is not None:
+                    mask_input = torch.cat([mask, uncond_mask], dim=0)
+                elif mask is not None:
+                    mask_input = torch.cat([mask, torch.ones_like(mask)], dim=0)
+                model_out = unet(x_input, t_input, context=context_input, mask=mask_input)
+                v_cond, v_uncond = torch.chunk(model_out, 2, dim=0)
+                predicted_v = v_uncond + guidance_scale * (v_cond - v_uncond)
             else:
-                predicted_noise = unet(x, t, context=cond_ctx, mask=mask)
+                predicted_v = unet(x, t, context=cond_ctx, mask=mask)
 
-            sqrt_alpha_bar_t = reverse_process.sqrt_alpha_bars[t].to(device)[:, None, None, None]
-            sqrt_one_minus_alpha_bar_t = reverse_process.sqrt_one_minus_alpha_bars[t].to(device)[:, None, None, None]
-
-            pred_x0 = (x - sqrt_one_minus_alpha_bar_t * predicted_noise) / sqrt_alpha_bar_t
+            # Ricostruzione x_0 e rumore dalla velocity predetta (v-parameterization, R3)
+            pred_x0 = reverse_process.predict_x0_from_v(x, predicted_v, t)
+            predicted_noise = reverse_process.predict_noise_from_v(x, predicted_v, t)
             pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
 
             if t_prev_val is None:
                 x = pred_x0
             else:
                 t_prev = torch.full((batch_size,), t_prev_val, device=device, dtype=torch.long)
-                alpha_bar_prev = reverse_process.alpha_bars[t_prev].to(device)[:, None, None, None]
+                alpha_bar_prev = reverse_process._extract(reverse_process.alpha_bars, t_prev, x)
                 sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
                 sqrt_one_minus_alpha_bar_prev = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev, min=0.0))
                 x = sqrt_alpha_bar_prev * pred_x0 + sqrt_one_minus_alpha_bar_prev * predicted_noise

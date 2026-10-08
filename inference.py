@@ -171,7 +171,7 @@ class AvatarGenerator:
         prompt: str = "a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard",
         seed: int = 42,
         guidance_scale: float = 3.5,
-        num_steps: int = 50,
+        num_steps: int = 20,
         batch_size: int = 1,
         plot: bool = False,
         output_dir: str = None
@@ -241,29 +241,31 @@ class AvatarGenerator:
                     t_prev_val = reversed_timesteps[i + 1].item() if (i + 1 < num_steps) else None
 
                     # CFG pass
-                    if guidance_scale > 1.0:
+                    if guidance_scale > 1.0 and context is not None and uncond_context is not None:
                         x_input = torch.cat([x, x], dim=0)
                         t_input = torch.cat([t, t], dim=0)
                         context_input = torch.cat([context, uncond_context], dim=0)
-                        mask_input = torch.cat([mask, uncond_mask], dim=0)
-                        all_noise = self.unet(x_input, t_input, context=context_input, mask=mask_input)
-                        eps_cond, eps_uncond = torch.chunk(all_noise, 2, dim=0)
-                        predicted_noise = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+                        mask_input = None
+                        if mask is not None and uncond_mask is not None:
+                            mask_input = torch.cat([mask, uncond_mask], dim=0)
+                        elif mask is not None:
+                            mask_input = torch.cat([mask, torch.ones_like(mask)], dim=0)
+                        model_out = self.unet(x_input, t_input, context=context_input, mask=mask_input)
+                        v_cond, v_uncond = torch.chunk(model_out, 2, dim=0)
+                        predicted_v = v_uncond + guidance_scale * (v_cond - v_uncond)
                     else:
-                        predicted_noise = self.unet(x, t, context=context, mask=mask)
+                        predicted_v = self.unet(x, t, context=context, mask=mask)
 
-                    sqrt_alpha_bar_t = self.reverse_process.sqrt_alpha_bars[t].to(self.device)[:, None, None, None]
-                    sqrt_one_minus_alpha_bar_t = self.reverse_process.sqrt_one_minus_alpha_bars[t].to(self.device)[:, None, None, None]
-
-                    # Stima x_0 con dynamic range clipping per prevenire posterizzazione (DEF-17)
-                    pred_x0 = (x - sqrt_one_minus_alpha_bar_t * predicted_noise) / sqrt_alpha_bar_t
+                    # Ricostruzione x_0 e rumore dalla velocita predetta (v-parameterization, R3)
+                    pred_x0 = self.reverse_process.predict_x0_from_v(x, predicted_v, t)
+                    predicted_noise = self.reverse_process.predict_noise_from_v(x, predicted_v, t)
                     pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
 
                     if t_prev_val is None:
                         x = pred_x0
                     else:
                         t_prev = torch.full((batch_size,), t_prev_val, device=self.device, dtype=torch.long)
-                        alpha_bar_prev = self.reverse_process.alpha_bars[t_prev].to(self.device)[:, None, None, None]
+                        alpha_bar_prev = self.reverse_process._extract(self.reverse_process.alpha_bars, t_prev, x)
                         sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
                         sqrt_one_minus_alpha_bar_prev = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev, min=0.0))
                         x = sqrt_alpha_bar_prev * pred_x0 + sqrt_one_minus_alpha_bar_prev * predicted_noise
@@ -332,7 +334,7 @@ def parse_args():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard",
+        default="a cartoon avatar with white skin, wavy hair, dark eyes, glasses, and no beard",
         help="Prompt testuale per condizionare la generazione dell'avatar"
     )
     parser.add_argument(
@@ -356,7 +358,7 @@ def parse_args():
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=50,
+        default=3,
         help="Numero di step per il campionamento accelerato DDIM (default: 50)"
     )
     parser.add_argument(

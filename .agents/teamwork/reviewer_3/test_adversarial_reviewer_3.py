@@ -1,396 +1,279 @@
-"""
-Reviewer 3 Adversarial Test Suite
-Comprehensive Verification of UNet EMA Integration, Defect Fixes, and Edge Cases:
-1. Fix for UnboundLocalError / NameError on text_encoder_weights in inference.py and evaluate.py
-2. Fix for in-place EMA lerp in make_ema_multi_avg_fn (torch._foreach_lerp_ vs _foreach_lerp)
-3. Fix for n_averaged restoration when ema_unet is wrapped in DataParallel / custom wrappers
-4. Flexible dataset path fallback and safe worker settings in main.py
-5. Robust prefix stripping handling both 'module.' and '_orig_mod.' (torch.compile)
-6. Complete train() and resume roundtrip with EMA checkpoints
-7. use_ema=False strict contract enforcement
-"""
-
+import sys
 import os
-import tempfile
-import argparse
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
 
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from models.diffusion import (
+    DiffusionScheduler,
+    DiffusionForwardProcess,
+    DiffusionReverseProcess,
+)
 from models.unet import Unet
-from models.transformer import FullTextEncoder
-from models.diffusion import DiffusionForwardProcess
-from train import (
-    create_ema_model,
-    make_ema_multi_avg_fn,
-    strip_prefix,
-    extract_ema_state_dict,
-    configure_optimizers,
-    train,
-    set_seed
-)
-from main import (
-    parse_args as parse_main_args,
-    resolve_checkpoint as resolve_checkpoint_main
-)
-from inference import (
-    AvatarGenerator,
-    parse_args as parse_infer_args,
-    resolve_checkpoint as resolve_checkpoint_infer
-)
-from evaluate import (
-    resolve_checkpoint as resolve_checkpoint_eval
-)
+from evaluate import sample_batch
+from main import parse_args
 
 
-class DummyTokenizer:
-    vocab = {"<PAD>": 0, "<UNK>": 1, "<SOS>": 2, "<EOS>": 3, "avatar": 4}
+def test_1_mathematical_inversion():
+    """Verify exact algebraic roundtrip inversion: (x0, eps) -> v -> (rec_x0, rec_eps)."""
+    print("[1/8] Testing mathematical inversion exactness across cosine and linear schedules...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    batch_size = 8
+    c, h, w = 3, 32, 32
 
-    def encode(self, text):
-        return [2, 4, 3]
-
-
-class DummyDataset(Dataset):
-    def __init__(self, size=8):
-        self.size = size
-
-    def __len__(self):
-        return self.size
-
-    def __getitem__(self, idx):
-        image = torch.randn(3, 64, 64)
-        tokens = torch.randint(0, 5, (20,), dtype=torch.long)
-        return image, tokens
-
-
-class MultiWrapper(nn.Module):
-    """Simulates custom wrapper without direct __getattr__ to self.module."""
-    def __init__(self, module):
-        super().__init__()
-        self.module = module
-
-    def forward(self, *args, **kwargs):
-        return self.module(*args, **kwargs)
-
-
-def test_1_text_encoder_weights_in_inference_and_evaluate():
-    """Verify inference.py and evaluate.py load checkpoints cleanly without UnboundLocalError."""
-    device = "cpu"
-    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device)
-    text_encoder = FullTextEncoder(vocab_size=10, max_seq_len=20, d_model=32, d_ff=64, num_layers=2).to(device)
-
-    raw_unet_weights = {k: v.clone() for k, v in unet.state_dict().items()}
-    raw_te_weights = {k: v.clone() for k, v in text_encoder.state_dict().items()}
-    ema_unet_weights = {k: v.clone() + 1.5 for k, v in unet.state_dict().items()}
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = os.path.join(tmpdir, "config.json")
-        with open(config_path, "w") as f:
-            f.write('{"resolution": [64, 64], "max_seq_len": 20, "vocab_path": "nonexistent.json"}')
-
-        # Scenario A: Full checkpoint with both unet and text_encoder weights
-        ckpt_a = os.path.join(tmpdir, "ckpt_full.pt")
-        torch.save({
-            "epoch": 5,
-            "unet_state_dict": raw_unet_weights,
-            "ema_unet_state_dict": ema_unet_weights,
-            "text_encoder_state_dict": raw_te_weights
-        }, ckpt_a)
-
-        gen_a = AvatarGenerator(config_path=config_path, checkpoint_path=ckpt_a, device=device, use_ema=True)
-        assert gen_a is not None
-        # Verify EMA unet was loaded
-        first_k = list(raw_unet_weights.keys())[0]
-        assert torch.allclose(next(gen_a.unet.parameters()), ema_unet_weights[first_k])
-
-        # Scenario B: Checkpoint with empty text_encoder_state_dict
-        ckpt_b = os.path.join(tmpdir, "ckpt_empty_te.pt")
-        torch.save({
-            "epoch": 2,
-            "unet_state_dict": raw_unet_weights,
-            "ema_unet_state_dict": ema_unet_weights,
-            "text_encoder_state_dict": {}
-        }, ckpt_b)
-
-        gen_b = AvatarGenerator(config_path=config_path, checkpoint_path=ckpt_b, device=device, use_ema=True)
-        assert gen_b is not None
-
-        # Scenario C: Checkpoint with missing text_encoder_state_dict
-        ckpt_c = os.path.join(tmpdir, "ckpt_no_te.pt")
-        torch.save({
-            "epoch": 1,
-            "unet_state_dict": raw_unet_weights,
-            "ema_unet_state_dict": ema_unet_weights
-        }, ckpt_c)
-
-        gen_c = AvatarGenerator(config_path=config_path, checkpoint_path=ckpt_c, device=device, use_ema=True)
-        assert gen_c is not None
-
-    print("Test 1 Passed: text_encoder_weights loads without UnboundLocalError across all scenarios.")
+    for sched_type in ["cosine", "linear"]:
+        sched = DiffusionScheduler(num_time_steps=1000, schedule_type=sched_type, device=device)
+        x0 = torch.randn(batch_size, c, h, w, device=device)
+        noise = torch.randn(batch_size, c, h, w, device=device)
+        
+        # Test boundary timesteps as well as random timesteps
+        test_ts = [0, 1, 250, 500, 750, 998, 999]
+        for t_val in test_ts:
+            t = torch.full((batch_size,), t_val, device=device, dtype=torch.long)
+            xt = (sched._extract(sched.sqrt_alpha_bars, t, x0) * x0 +
+                  sched._extract(sched.sqrt_one_minus_alpha_bars, t, x0) * noise)
+            
+            v_target = sched.get_velocity(x0, noise, t)
+            
+            rec_x0 = sched.predict_x0_from_v(xt, v_target, t)
+            rec_eps = sched.predict_noise_from_v(xt, v_target, t)
+            
+            x0_err = torch.max(torch.abs(rec_x0 - x0)).item()
+            eps_err = torch.max(torch.abs(rec_eps - noise)).item()
+            
+            assert x0_err < 1e-5, f"Schedule '{sched_type}' at t={t_val}: x0 error too large: {x0_err}"
+            assert eps_err < 1e-5, f"Schedule '{sched_type}' at t={t_val}: eps error too large: {eps_err}"
+    print("   All mathematical roundtrips verified with error < 1e-5!")
 
 
-def test_2_make_ema_multi_avg_fn_in_place_verification():
-    """Verify make_ema_multi_avg_fn updates averaged_param_list in place and math is exact."""
-    decay = 0.90
-    weight = 1.0 - decay  # 0.10
+def test_2_multiformat_timesteps_and_batch_mismatch():
+    """Test int, float, list, tuple, 0D, 1D, 2D, 3D tensor timesteps and batch mismatch handling."""
+    print("[2/8] Testing multi-format timesteps (list, tuple, 2D/3D tensor) and batch mismatch guards...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sched = DiffusionScheduler(num_time_steps=1000, device=device)
+    rev = DiffusionReverseProcess(num_time_steps=1000, device=device)
+    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device).eval()
 
-    avg_fn = make_ema_multi_avg_fn(decay=decay)
+    x = torch.randn(2, 3, 16, 16, device=device)
+    context = torch.randn(2, 4, 32, device=device)
 
-    p_avg1 = torch.tensor([10.0, 20.0, 30.0])
-    p_cur1 = torch.tensor([0.0, 0.0, 0.0])
+    # Various formats that must succeed cleanly
+    valid_formats = [
+        ("int", 50),
+        ("float", 50.0),
+        ("list", [10, 20]),
+        ("tuple", (10, 20)),
+        ("0D tensor", torch.tensor(50, device=device)),
+        ("1D length-1 tensor", torch.tensor([50], device=device)),
+        ("1D batched tensor", torch.tensor([10, 20], device=device)),
+        ("2D (1, 1) tensor", torch.tensor([[50]], device=device)),
+        ("2D (2, 1) tensor", torch.tensor([[10], [20]], device=device)),
+        ("3D (1, 1, 1) tensor", torch.tensor([[[50]]], device=device)),
+    ]
 
-    p_avg2 = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    p_cur2 = torch.tensor([[11.0, 12.0], [13.0, 14.0]])
+    for name, t_in in valid_formats:
+        c = sched._extract(sched.sqrt_alpha_bars, t_in, x)
+        assert c.shape[0] in [1, 2] and c.shape[1:] == (1, 1, 1), f"Extract failed for {name}"
+        res = c * x
+        assert res.shape == x.shape, f"Broadcast failed for {name}"
+        
+        # Test sample with valid format
+        out = rev.sample(unet, x, t_in, context=context, noise_free=True)
+        assert out.shape == x.shape, f"Sample output shape mismatch for {name}: {out.shape}"
+        print(f"   Format '{name}' passed cleanly.")
 
-    avg_list = [p_avg1, p_avg2]
-    cur_list = [p_cur1, p_cur2]
-
-    # Execute EMA update
-    avg_fn(avg_list, cur_list, num_averaged=torch.tensor(1))
-
-    # Expected values: avg * 0.9 + cur * 0.1
-    expected_1 = torch.tensor([9.0, 18.0, 27.0])
-    expected_2 = torch.tensor([[2.0, 3.0], [4.0, 5.0]])
-
-    assert torch.allclose(p_avg1, expected_1), f"Expected {expected_1}, got {p_avg1}"
-    assert torch.allclose(p_avg2, expected_2), f"Expected {expected_2}, got {p_avg2}"
-
-    print("Test 2 Passed: make_ema_multi_avg_fn performs exact in-place EMA updates.")
-
-
-def test_3_dataparallel_and_custom_wrapper_n_averaged_restoration():
-    """Verify that n_averaged is correctly restored when ema_unet is wrapped in MultiWrapper."""
-    device = "cpu"
-    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device)
-    ema_unet = create_ema_model(unet, decay=0.99, device=device)
-
-    # Wrap ema_unet in MultiWrapper
-    wrapped_ema = MultiWrapper(ema_unet)
-
-    # Prepare checkpoint with ema_state_dict and ema_n_averaged
-    synthetic_ema_sd = {}
-    for k, v in unet.state_dict().items():
-        synthetic_ema_sd[f"module.{k}"] = v.clone()
-    synthetic_ema_sd["n_averaged"] = torch.tensor(42)
-
-    ckpt = {
-        "epoch": 3,
-        "unet_state_dict": unet.state_dict(),
-        "ema_state_dict": synthetic_ema_sd,
-        "ema_n_averaged": 42
-    }
-
-    # Simulate resumption logic from main.py
-    avg_model = wrapped_ema
-    while hasattr(avg_model, "module") and not hasattr(avg_model, "n_averaged"):
-        avg_model = avg_model.module
-
-    assert hasattr(avg_model, "n_averaged")
-
-    # Restore via Tier 1
-    avg_model.load_state_dict(ckpt["ema_state_dict"])
-    assert avg_model.n_averaged.item() == 42
-
-    # Simulate Tier 2 fallback with explicit n_averaged update
-    avg_model.n_averaged.fill_(0)
-    assert avg_model.n_averaged.item() == 0
-
-    if hasattr(avg_model, "n_averaged"):
-        n_val = ckpt["ema_n_averaged"]
-        n_int = int(n_val.item() if hasattr(n_val, "item") else n_val)
-        if isinstance(avg_model.n_averaged, torch.Tensor):
-            avg_model.n_averaged.fill_(n_int)
-        else:
-            avg_model.n_averaged = n_int
-
-    assert avg_model.n_averaged.item() == 42
-
-    # Simulate Tier 3 legacy fallback
-    if hasattr(avg_model, "n_averaged"):
-        if isinstance(avg_model.n_averaged, torch.Tensor):
-            avg_model.n_averaged.fill_(0)
-        else:
-            avg_model.n_averaged = 0
-    assert avg_model.n_averaged.item() == 0
-
-    print("Test 3 Passed: Wrapped ema_unet correctly accesses and restores n_averaged.")
+    # Batch mismatch guard test
+    mismatched_t = torch.tensor([10, 20, 30], device=device)  # length 3 for batch size 2
+    try:
+        rev.sample(unet, x, mismatched_t)
+        assert False, "Batch mismatch failed to raise ValueError!"
+    except ValueError as e:
+        print(f"   Batch mismatch caught with expected ValueError: {e}")
 
 
-def test_4_main_dataset_path_fallback_and_cli():
-    """Verify main.py CLI arguments for dataset paths and safe worker configurations."""
-    parser = parse_main_args()
-    args = parser.parse_args(["--data_dir", "test_data", "--num_workers", "0", "--max_steps", "5"])
-    assert args.data_dir == "test_data"
-    assert args.num_workers == 0
-    assert args.max_steps == 5
-    assert args.use_ema is True
+def test_3_dtype_preservation():
+    """Verify dtype preservation across fp16, bf16, fp32, fp64."""
+    print("[3/8] Testing tensor dtype preservation across fp16, fp32, fp64...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sched = DiffusionScheduler(num_time_steps=1000, device=device)
+    rev = DiffusionReverseProcess(num_time_steps=1000, device=device)
 
-    # Test --no_ema switch
-    args_no_ema = parser.parse_args(["--no_ema"])
-    assert args_no_ema.use_ema is False
+    dtypes_to_test = [torch.float32, torch.float64]
+    if device == "cuda":
+        dtypes_to_test.extend([torch.float16, torch.bfloat16])
 
-    print("Test 4 Passed: main.py CLI arguments and worker settings parsed correctly.")
+    for dt in dtypes_to_test:
+        x = torch.randn(2, 3, 16, 16, device=device, dtype=dt)
+        noise = torch.randn(2, 3, 16, 16, device=device, dtype=dt)
+        v = torch.randn(2, 3, 16, 16, device=device, dtype=dt)
+        t = torch.tensor([10, 20], device=device)
+
+        v_calc = sched.get_velocity(x, noise, t)
+        assert v_calc.dtype == dt, f"get_velocity dtype mismatch: got {v_calc.dtype}, expected {dt}"
+
+        rec_x0 = sched.predict_x0_from_v(x, v, t)
+        assert rec_x0.dtype == dt, f"predict_x0_from_v dtype mismatch: got {rec_x0.dtype}, expected {dt}"
+
+        rec_eps = sched.predict_noise_from_v(x, v, t)
+        assert rec_eps.dtype == dt, f"predict_noise_from_v dtype mismatch: got {rec_eps.dtype}, expected {dt}"
+
+        # Mock model that returns velocity of matching dtype
+        class MockModel(nn.Module):
+            def forward(self, x, t, context=None, mask=None):
+                return torch.zeros_like(x)
+
+        model = MockModel()
+        out = rev.sample(model, x, t, clip_denoised=True)
+        assert out.dtype == dt, f"sample output dtype mismatch: got {out.dtype}, expected {dt}"
+        print(f"   Dtype '{dt}' preserved across all operations.")
 
 
-def test_5_strip_prefix_with_compile_orig_mod():
-    """Verify strip_prefix cleanly removes both 'module.' and '_orig_mod.' prefixes."""
-    state_dict = {
-        "module.conv1.weight": torch.tensor([1.0]),
-        "_orig_mod.conv2.weight": torch.tensor([2.0]),
-        "module._orig_mod.conv3.weight": torch.tensor([3.0]),
-        "_orig_mod.module.conv4.weight": torch.tensor([4.0]),
-        "n_averaged": torch.tensor(5)
-    }
+def test_4_terminal_step_langevin_isolation():
+    """Verify that Langevin noise is 0 at t=0 even in mixed batches."""
+    print("[4/8] Testing Langevin noise isolation at t=0 in uniform and mixed batches...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    rev = DiffusionReverseProcess(num_time_steps=1000, device=device)
 
-    cleaned = strip_prefix(state_dict)
-    assert "conv1.weight" in cleaned
-    assert "conv2.weight" in cleaned
-    assert "conv3.weight" in cleaned
-    assert "conv4.weight" in cleaned
-    assert "n_averaged" in cleaned
-    assert not any(k.startswith("module.") or k.startswith("_orig_mod.") for k in cleaned.keys())
+    class ZeroModel(nn.Module):
+        def forward(self, x, t, context=None, mask=None):
+            return torch.zeros_like(x)
 
-    print("Test 5 Passed: strip_prefix handles module. and _orig_mod. prefixes recursively.")
+    model = ZeroModel()
+    torch.manual_seed(999)
+    x = torch.randn(2, 3, 16, 16, device=device)
+
+    # Uniform t=0
+    t_zero = torch.tensor([0, 0], device=device)
+    out1 = rev.sample(model, x, t_zero, noise_free=False)
+    out2 = rev.sample(model, x, t_zero, noise_free=False)
+    assert torch.allclose(out1, out2), "Uniform t=0 produced non-deterministic noise!"
+
+    # Mixed batch: sample 0 at t=0, sample 1 at t=500
+    t_mixed = torch.tensor([0, 500], device=device)
+    torch.manual_seed(123)
+    out_mixed1 = rev.sample(model, x, t_mixed, noise_free=False)
+    torch.manual_seed(456)
+    out_mixed2 = rev.sample(model, x, t_mixed, noise_free=False)
+
+    # Item 0 (t=0) MUST be deterministic (0 Langevin noise)
+    assert torch.allclose(out_mixed1[0], out_mixed2[0]), "Sample at t=0 in mixed batch received Langevin noise!"
+    # Item 1 (t=500) MUST differ due to Langevin noise
+    assert not torch.allclose(out_mixed1[1], out_mixed2[1]), "Sample at t=500 in mixed batch failed to receive noise!"
+    print("   Langevin noise successfully isolated at t=0 in all cases.")
 
 
-def test_6_full_train_and_resume_roundtrip():
-    """Verify complete train() run with EMA, checkpoint serialization, and resumption."""
-    device = "cpu"
-    set_seed(42)
+def test_5_reverse_process_sampling_variations():
+    """Test reverse process sample with CFG, mask, and noise_free variations."""
+    print("[5/8] Testing reverse process sample under various CFG and masking configurations...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    rev = DiffusionReverseProcess(num_time_steps=1000, device=device)
+    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device).eval()
 
-    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device)
-    text_encoder = FullTextEncoder(vocab_size=10, max_seq_len=20, d_model=32, d_ff=64, num_layers=2).to(device)
-    forward_process = DiffusionForwardProcess(num_time_steps=50, device=device)
-    dataloader = DataLoader(DummyDataset(size=4), batch_size=2)
-    tokenizer = DummyTokenizer()
-    opt, sched = configure_optimizers(unet, text_encoder, lr=1e-4, total_epochs=2)
+    x = torch.randn(2, 3, 16, 16, device=device)
+    t = torch.tensor([50, 100], device=device)
+    ctx = torch.randn(2, 4, 32, device=device)
+    uncond_ctx = torch.randn(2, 4, 32, device=device)
+    mask = torch.ones(2, 1, 1, 4, device=device)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Phase 1: Train for 1 epoch, max 2 steps
-        ema_out = train(
+    # CFG with mask
+    out_cfg = rev.sample(unet, x, t, context=ctx, uncond_context=uncond_ctx, mask=mask, guidance_scale=3.5)
+    assert out_cfg.shape == x.shape
+
+    # CFG with mask=None
+    out_cfg_nomask = rev.sample(unet, x, t, context=ctx, uncond_context=uncond_ctx, mask=None, guidance_scale=3.5)
+    assert out_cfg_nomask.shape == x.shape
+
+    # No CFG (guidance_scale=1.0)
+    out_nocfg = rev.sample(unet, x, t, context=ctx, guidance_scale=1.0)
+    assert out_nocfg.shape == x.shape
+
+    # noise_free=True
+    out_nf = rev.sample(unet, x, t, context=ctx, noise_free=True)
+    assert out_nf.shape == x.shape
+
+    # clip_denoised=False
+    out_noclip = rev.sample(unet, x, t, context=ctx, clip_denoised=False)
+    assert out_noclip.shape == x.shape
+    print("   All reverse process CFG and masking variations verified.")
+
+
+def test_6_ddim_sampling_loops():
+    """Test DDIM sampling loop in evaluate.py with various step counts."""
+    print("[6/8] Testing DDIM sampling loop in evaluate.py across step counts (1, 2, full)...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    rev = DiffusionReverseProcess(num_time_steps=1000, device=device)
+    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device).eval()
+
+    ctx = torch.randn(2, 4, 32, device=device)
+    uncond_ctx = torch.randn(2, 4, 32, device=device)
+    mask = torch.ones(2, 1, 1, 4, device=device)
+
+    for steps in [1, 2, 5]:
+        out = sample_batch(
             unet=unet,
-            text_encoder=text_encoder,
-            forward_process=forward_process,
-            dataloader=dataloader,
-            tokenizer=tokenizer,
-            optimizer=opt,
-            scheduler=sched,
-            epochs=1,
+            reverse_process=rev,
+            cond_ctx=ctx,
+            uncond_ctx=uncond_ctx,
+            mask=mask,
+            shape=(2, 3, 16, 16),
             device=device,
-            checkpoint_dir=tmpdir,
-            max_steps=2,
-            use_ema=True,
-            ema_decay=0.95
+            num_steps=steps,
+            guidance_scale=3.0,
         )
-
-        assert ema_out is not None
-        ckpt_path = os.path.join(tmpdir, "checkpoint_epoch_1.pt")
-        assert os.path.exists(ckpt_path)
-
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        assert "unet_state_dict" in ckpt
-        assert "text_encoder_state_dict" in ckpt
-        assert "ema_unet_state_dict" in ckpt
-        assert "ema_state_dict" in ckpt
-        assert "ema_n_averaged" in ckpt
-        assert ckpt["ema_n_averaged"] == 2
-
-        # Phase 2: Resume training for epoch 2
-        unet_resumed = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device)
-        unet_resumed.load_state_dict(strip_prefix(ckpt["unet_state_dict"]))
-
-        ema_resumed = create_ema_model(unet_resumed, decay=0.95, device=device)
-        ema_resumed.load_state_dict(ckpt["ema_state_dict"])
-        assert ema_resumed.n_averaged.item() == 2
-
-        opt_resumed, sched_resumed = configure_optimizers(unet_resumed, text_encoder, lr=1e-4, total_epochs=2)
-        opt_resumed.load_state_dict(ckpt["optimizer_state_dict"])
-        sched_resumed.load_state_dict(ckpt["scheduler_state_dict"])
-
-        ema_out_2 = train(
-            unet=unet_resumed,
-            text_encoder=text_encoder,
-            forward_process=forward_process,
-            dataloader=dataloader,
-            tokenizer=tokenizer,
-            optimizer=opt_resumed,
-            scheduler=sched_resumed,
-            epochs=2,
-            start_epoch=1,
-            device=device,
-            checkpoint_dir=tmpdir,
-            max_steps=2,
-            ema_unet=ema_resumed,
-            use_ema=True
-        )
-
-        assert ema_out_2 is not None
-        ckpt_path_2 = os.path.join(tmpdir, "checkpoint_epoch_2.pt")
-        assert os.path.exists(ckpt_path_2)
-
-        ckpt_2 = torch.load(ckpt_path_2, map_location=device, weights_only=False)
-        assert ckpt_2["epoch"] == 2
-        assert ckpt_2["ema_n_averaged"] == 4
-
-    print("Test 6 Passed: Complete train() and resume roundtrip verified with correct step accumulation.")
+        assert out.shape == (2, 3, 16, 16), f"DDIM sample_batch failed for num_steps={steps}"
+        print(f"   DDIM {steps}-step sampling verified.")
 
 
-def test_7_use_ema_false_contract():
-    """Verify use_ema=False produces zero EMA keys and AvatarGenerator / evaluate load regular weights."""
-    device = "cpu"
-    set_seed(42)
+def test_7_v_target_loss_and_backprop():
+    """Test training loss computation with v_target and full backward pass."""
+    print("[7/8] Testing v-target training loss computation and gradient backpropagation...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    fwd = DiffusionForwardProcess(num_time_steps=1000, device=device)
+    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device).train()
+    optimizer = torch.optim.AdamW(unet.parameters(), lr=1e-4)
+    criterion = nn.MSELoss()
 
-    unet = Unet(in_channels=3, out_channels=3, base_channels=16, context_dim=32).to(device)
-    text_encoder = FullTextEncoder(vocab_size=10, max_seq_len=20, d_model=32, d_ff=64, num_layers=2).to(device)
-    forward_process = DiffusionForwardProcess(num_time_steps=50, device=device)
-    dataloader = DataLoader(DummyDataset(size=4), batch_size=2)
-    tokenizer = DummyTokenizer()
-    opt, sched = configure_optimizers(unet, text_encoder, lr=1e-4, total_epochs=1)
+    images = torch.randn(2, 3, 16, 16, device=device)
+    noise = torch.randn_like(images)
+    timesteps = torch.randint(0, 1000, (2,), device=device).long()
+    noisy_images = fwd.add_noise(images, noise, timesteps)
+    context = torch.randn(2, 4, 32, device=device)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        ema_out = train(
-            unet=unet,
-            text_encoder=text_encoder,
-            forward_process=forward_process,
-            dataloader=dataloader,
-            tokenizer=tokenizer,
-            optimizer=opt,
-            scheduler=sched,
-            epochs=1,
-            device=device,
-            checkpoint_dir=tmpdir,
-            max_steps=2,
-            use_ema=False
-        )
-        assert ema_out is None
+    optimizer.zero_grad()
+    v_target = fwd.get_velocity(images, noise, timesteps)
+    pred_v = unet(noisy_images, timesteps, context)
+    loss = criterion(pred_v, v_target)
+    loss.backward()
 
-        ckpt_path = os.path.join(tmpdir, "checkpoint_epoch_1.pt")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-        assert "ema_unet_state_dict" not in ckpt
-        assert "ema_state_dict" not in ckpt
-        assert "ema_n_averaged" not in ckpt
+    # Verify gradients
+    has_grads = any(p.grad is not None and torch.isfinite(p.grad).all() for p in unet.parameters())
+    assert has_grads, "Gradients missing or non-finite!"
+    optimizer.step()
+    print(f"   Backpropagation verified: Loss={loss.item():.4f}, gradients valid.")
 
-        # AvatarGenerator with use_ema=False
-        config_path = os.path.join(tmpdir, "config.json")
-        with open(config_path, "w") as f:
-            f.write('{"resolution": [64, 64], "max_seq_len": 20, "vocab_path": "nonexistent.json"}')
 
-        gen_no_ema = AvatarGenerator(config_path=config_path, checkpoint_path=ckpt_path, device=device, use_ema=False)
-        first_param = next(gen_no_ema.unet.parameters())
-        first_k = list(ckpt["unet_state_dict"].keys())[0]
-        assert torch.allclose(first_param, ckpt["unet_state_dict"][first_k])
-
-    print("Test 7 Passed: use_ema=False contract strictly enforced.")
+def test_8_cli_resilience():
+    """Verify CLI argument parsing in train.py and main.py tolerates unknown args."""
+    print("[8/8] Testing CLI argument parsing resilience with unknown args...")
+    parser = parse_args()
+    test_args = ["--max_steps", "2", "--local_rank", "0", "--extra_flag", "test"]
+    parsed_args, unknown = parser.parse_known_args(test_args)
+    assert parsed_args.max_steps == 2
+    assert "--local_rank" in unknown
+    print("   CLI argument parsing handles unknown args without SystemExit.")
 
 
 if __name__ == "__main__":
-    test_1_text_encoder_weights_in_inference_and_evaluate()
-    test_2_make_ema_multi_avg_fn_in_place_verification()
-    test_3_dataparallel_and_custom_wrapper_n_averaged_restoration()
-    test_4_main_dataset_path_fallback_and_cli()
-    test_5_strip_prefix_with_compile_orig_mod()
-    test_6_full_train_and_resume_roundtrip()
-    test_7_use_ema_false_contract()
-    print("\n=======================================================")
-    print("ALL 7 REVIEWER 3 ADVERSARIAL STRESS TESTS PASSED CLEANLY!")
-    print("=======================================================")
+    test_1_mathematical_inversion()
+    test_2_multiformat_timesteps_and_batch_mismatch()
+    test_3_dtype_preservation()
+    test_4_terminal_step_langevin_isolation()
+    test_5_reverse_process_sampling_variations()
+    test_6_ddim_sampling_loops()
+    test_7_v_target_loss_and_backprop()
+    test_8_cli_resilience()
+    print("\n=== ALL REVIEWER 3 ADVERSARIAL TESTS PASSED SUCCESSFULLY! ===")

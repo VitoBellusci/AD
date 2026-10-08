@@ -1,64 +1,46 @@
-# Sentinel Final Handoff Report: UNet Exponential Moving Average (EMA) Integration
+# Handoff Report — Sentinel
 
-**Project**: Avatar Diffusion — UNet Exponential Moving Average (EMA) Integration  
-**Date**: October 8, 2026  
-**Status**: COMPLETE (VICTORY CONFIRMED)  
-**Sentinel Working Directory**: `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\sentinel`
+## Observation
+The user requested a single self-contained modification to migrate the existing avatar diffusion model from $\epsilon$-prediction (noise prediction) to $v$-prediction (velocity target):
+1. **R1. Update Training Target**: In `train.py`, calculate loss against velocity target $v_{\text{target}} = \sqrt{\bar{\alpha}_t} \epsilon - \sqrt{1 - \bar{\alpha}_t} x_0$.
+2. **R2. Update Reverse Process**: In `models/diffusion.py`, update `DiffusionReverseProcess.sample` to assume velocity output and reconstruct $\hat{x}_0$ and $\hat{\epsilon}$.
+3. **R3. Update DDIM Sampling**: In `evaluate.py` (`sample_batch`) and `inference.py` (`generate`), update sampling loops to reconstruct $\hat{x}_0$ and $\hat{\epsilon}$ from predicted velocity.
+Acceptance criteria required:
+- Quick test using `python train.py --max_steps 2` completing without shape mismatches or crashes.
+- Quick test using `python inference.py --num_steps 2` completing and generating output image without crashing.
+- Mathematical formulas for extracting $x_0$ and $\epsilon$ from $v$ matching the definition of v-parameterization.
 
----
+## Logic Chain
+1. **Request Intake & Routing**: Appended verbatim request to `ORIGINAL_REQUEST.md`. Evaluated against the Routing Decision Table; classified as **SWE Light** (`teamwork_preview_swe`) due to explicit single self-contained scope and small focused team instruction.
+2. **Dispatch & Crons**: Dispatched `teamwork_preview_swe` (`swe_3`, ID `f650a37d-65b9-44d1-b690-c00348606352`). Scheduled 8-minute progress reporting cron and 10-minute liveness check cron.
+3. **Implementation & Hardening**:
+   - `implementer_1` implemented the core $v$-prediction target and sampling logic across all four scripts.
+   - 3 consecutive adversarial reviewer rounds (`reviewer_1`, `reviewer_2`, `reviewer_3`) hardened edge cases:
+     * Handled 0-D, iterable, and float timesteps across devices.
+     * Guaranteed safe Langevin noise per-sample masking at $t=0$.
+     * Centralized conversion helpers in `DiffusionScheduler` base class.
+     * Ensured dtype and shape preservation during dynamic range clipping.
+   - Orchestrator verified end-to-end execution of `train.py --max_steps 2` and `inference.py --num_steps 2`.
+4. **Mandatory Post-Victory Audit**: Spawned independent auditor `victory_auditor_6` (`fcce8227-c060-43b6-ac0c-52b7a3e9146e`) with access to `ORIGINAL_REQUEST.md`. The audit verified:
+   - Phase A (Timeline): Genuine chronological development across multi-agent logs.
+   - Phase B (Integrity): Zero mock returns or facades; real model weights and outputs verified.
+   - Phase C (Independent Test Execution): Exact mathematical inversion confirmed (inversion error $< 4.77 \times 10^{-7}$), AST and runtime execution of `train.py` and `inference.py` verified.
+   - Verdict: **VICTORY CONFIRMED**.
+5. **Cleanup**: Both background crons killed and all subagents terminated via `manage_subagents(action="kill_all")`.
 
-## 1. Observation
-- **User Request**: Integrate Exponential Moving Average (EMA) for the UNet model in the PyTorch diffusion training loop (`train.py` and `main.py`) to prevent mode collapse during training.
-- **Requirements & Acceptance Criteria**:
-  - **R1**: Integrate a robust, pre-built PyTorch EMA library to maintain EMA UNet weights.
-  - **R2**: Update training loop for per-step EMA updates and dual-state checkpointing (`unet_state_dict` + `ema_unet_state_dict` / `ema_state_dict`); ensure seamless training resumption.
-  - **Acceptance Criteria**: Fast dummy training completes (`--max_steps 5`), checkpoints contain EMA state dict alongside regular weights, and training resumes without errors.
-- **Execution Trajectory**:
-  - Routed to SWE Light (`teamwork_preview_swe`, workspace `.agents/teamwork/swe_2/`).
-  - Managed 1 implementer (`implementer_1`) and 3 sequential adversarial review rounds (`reviewer_1`, `reviewer_2`, `reviewer_3`).
-  - Independent post-victory audit dispatched (`victory_auditor_5`, workspace `.agents/teamwork/victory_auditor_5/`) and delivered a unanimous `VICTORY CONFIRMED` verdict across all 3 audit phases.
+## Caveats
+- Pre-existing checkpoints in `checkpoints/` were trained under $\epsilon$-prediction; running sampling with these checkpoints executes correctly without crashes, but visual image quality requires retraining or fine-tuning under the new $v$-prediction objective.
+- High step counts ($N=1000$) on CPU exhibit substantial runtime latency; use CUDA or DDIM ($N \le 50$) for efficient sampling.
 
----
+## Conclusion
+The migration of the avatar diffusion codebase to $v$-prediction is completely implemented, verified, hardened against regressions and edge cases, and independently confirmed by victory audit.
 
-## 2. Logic Chain & Technical Substance
-1. **EMA Library Selection & Integration (R1)**:
-   - Integrated PyTorch's native `torch.optim.swa_utils.AveragedModel` with `get_ema_multi_avg_fn` via helper `create_ema_model` in `train.py`.
-   - Uses PyTorch's hardware-accelerated vectorized in-place `torch._foreach_lerp_` kernel for zero external dependencies and optimal training throughput.
-   - EMA weights are explicitly moved to the target device with `requires_grad=False` to preserve memory.
-2. **Training Loop & Optimization Updates (R2)**:
-   - Synchronized EMA weight updates in `train.py` immediately following optimizer steps.
-   - Added AMP `GradScaler` protection: if inf/NaN gradients occur and the optimizer step is skipped, the EMA update is safely bypassed to preserve numerical synchronization.
-3. **Checkpoint Serialization & Dual-State Preservation (R2)**:
-   - Checkpoints serialize `unet_state_dict` (active model weights), `ema_unet_state_dict` (direct loadable state dict of the averaged model), `ema_state_dict` (`AveragedModel` state dict), and `ema_n_averaged` (step counter).
-4. **Hierarchical Resumption Architecture (R2)**:
-   - Implemented 3-tier resilient resumption in `main.py`:
-     - *Tier 1*: Full `AveragedModel` restoration from `ema_state_dict`.
-     - *Tier 2*: Raw state dict restoration from `ema_unet_state_dict` with `n_averaged` step restoration.
-     - *Tier 3*: Fail-soft fallback from `unet_state_dict` for legacy or corrupted checkpoints.
-   - Handled recursive prefix stripping (`module.` and `_orig_mod.`) for single-GPU, DataParallel, DDP, and compiled models.
-5. **Adversarial Hardening Across Review Rounds**:
-   - Fixed silent no-op bug in multi-tensor EMA averaging by enforcing in-place `torch._foreach_lerp_`.
-   - Fixed `UnboundLocalError` on `text_encoder_weights` in `inference.py` and `evaluate.py`.
-   - Hardened `module.n_averaged` unwrapping in container/wrapper hierarchies.
-   - Added CLI arguments `--use_ema`, `--no_ema`, and `--ema_decay` across training, evaluation, and inference entrypoints.
-
----
-
-## 3. Caveats & Operating Guidance
-- **CLI Default Paths**: `main.py` default dataset paths are configured for Kaggle environments; for local execution, pass `--data_dir`, `--image_dir`, or `--csv_path` as needed.
-- **Inference Mode**: Downstream generation scripts (`inference.py` and `evaluate.py`) default to using EMA weights when present, but accept `--no_ema` if raw active weights are specifically requested.
-
----
-
-## 4. Conclusion
-The Exponential Moving Average (EMA) implementation for the UNet diffusion model is completely implemented, rigorously verified across 3 review rounds and 33 programmatic tests, validated by an independent Victory Auditor with a `VICTORY CONFIRMED` verdict, and fully ready for production usage.
-
----
-
-## 5. Verification Method & Evidence
-- **Independent Audit Verdict**: `VICTORY CONFIRMED` (`victory_auditor_5`)
-  - **Phase A (Timeline & Provenance)**: PASS (authentic multi-round development lifecycle).
-  - **Phase B (Integrity Forensics)**: PASS (zero stubs, zero hardcoding, zero circular verification).
-  - **Phase C (Independent Test Execution)**: PASS (33/33 tests passing with full mathematical concordance).
-- **Audit Report**: `c:\Users\Admin\Desktop\avatar diffusion\.agents\teamwork\victory_auditor_5\handoff.md`
-- **Teardown**: All background monitoring crons and active subagents cleanly terminated.
+## Verification Method
+- **Mathematical Exactness**:
+  * Forward velocity: $v_{\text{target}} = \sqrt{\bar{\alpha}_t} \epsilon - \sqrt{1 - \bar{\alpha}_t} x_0$
+  * Signal reconstruction: $\hat{x}_0 = \sqrt{\bar{\alpha}_t} x_t - \sqrt{1 - \bar{\alpha}_t} v$
+  * Noise reconstruction: $\hat{\epsilon} = \sqrt{\bar{\alpha}_t} v + \sqrt{1 - \bar{\alpha}_t} x_t$
+  * Reconstructed state matches original with error $< 5 \times 10^{-7}$.
+- **Training Execution**: `python train.py --max_steps 2` completed 2 optimization steps without shape errors and saved `checkpoint_epoch_1.pt`.
+- **Inference Execution**: `python inference.py --num_steps 2` executed DDIM sampling successfully and generated valid avatar output (`sample_seed42_step2_0.png`).
+- **Audit**: Independent victory audit returned **VICTORY CONFIRMED**.
