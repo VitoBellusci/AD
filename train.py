@@ -241,7 +241,7 @@ def train(
     lr: float = 1e-4,
     max_steps: Optional[int] = None,
     ema_unet: Optional[Union[nn.Module, Any]] = None,
-    ema_decay: float = 0.9999,
+    ema_decay: float = 0.999,
     use_ema: bool = True
 ):
     """
@@ -459,15 +459,15 @@ def train(
         print(f"Checkpoint salvato: {checkpoint_path}")
 
         # Elimina il checkpoint dell'epoca precedente per non riempire il disco di Kaggle
-        old_checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
-        if os.path.exists(old_checkpoint_path):
-            try:
-                os.remove(old_checkpoint_path)
-                print(f"Rimosso vecchio checkpoint per risparmiare spazio: {old_checkpoint_path}")
-            except OSError:
-                pass
+        # old_checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch}.pt")
+        # if os.path.exists(old_checkpoint_path):
+        #     try:
+        #         os.remove(old_checkpoint_path)
+        #         print(f"Rimosso vecchio checkpoint per risparmiare spazio: {old_checkpoint_path}")
+        #     except OSError:
+        #         pass
 
     if ema_unet is not None and hasattr(ema_unet, 'eval'):
         ema_unet.eval()
 
-    return ema_unet
+    return ema_unet

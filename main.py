@@ -91,9 +91,9 @@ def parse_args():
                         help="Train conditional diffusion model (default: True)")
     parser.add_argument("--unconditional", dest="conditional", action="store_false",
                         help="Train unconditional baseline (DEF-11)")
-    parser.add_argument("--epochs", type=int, default=50, help="Total training epochs (default: 50)")
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size (default: 256)")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
+    parser.add_argument("--epochs", type=int, default=70, help="Total training epochs (default: 70)")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 128)")
+    parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate (default: 5e-5)")
     parser.add_argument("--cfg_drop_rate", type=float, default=0.1, help="CFG dropout rate (default: 0.1)")
     default_ckpt_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "checkpoints"
     parser.add_argument("--checkpoint_dir", type=str, default=default_ckpt_dir, help="Directory for checkpoints")
@@ -103,8 +103,8 @@ def parse_args():
                         help="Enable Exponential Moving Average (EMA) for UNet (default: True)")
     parser.add_argument("--no_ema", dest="use_ema", action="store_false",
                         help="Disable Exponential Moving Average (EMA) for UNet")
-    parser.add_argument("--ema_decay", type=float, default=0.9999,
-                        help="Exponential Moving Average decay factor (default: 0.9999)")
+    parser.add_argument("--ema_decay", type=float, default=0.999,
+                        help="Exponential Moving Average decay factor (default: 0.999)")
     parser.add_argument("--data_dir", type=str, default="data", help="Directory containing dataset")
     parser.add_argument("--image_dir", type=str, default=None, help="Explicit directory for cartoonset images")
     parser.add_argument("--csv_path", type=str, default=None, help="Explicit path to cartoon_image_attributes.csv")
@@ -203,7 +203,7 @@ def main(args=None):
         metadata=raw_metadata,
         tokenizer=tokenizer,
         config=config,
-        use_ram_cache=True
+        use_ram_cache=False
     )
     val_dataset = Subset(dataset, val_indices)
     train_dataset = Subset(dataset, train_indices)
@@ -253,8 +253,8 @@ def main(args=None):
         ema_unet = create_ema_model(unet, decay=parsed_args.ema_decay, device=device)
         print(f"EMA UNet inizializzato con decay={parsed_args.ema_decay}")
 
-    unet = torch.nn.DataParallel(unet)
-    text_encoder = torch.nn.DataParallel(text_encoder)
+    # unet = torch.nn.DataParallel(unet)
+    # text_encoder = torch.nn.DataParallel(text_encoder)
     
     # 7. Inizializzazione Processo di Diffusione (Forward)
     forward_process = DiffusionForwardProcess(num_time_steps=1000, device=device)
