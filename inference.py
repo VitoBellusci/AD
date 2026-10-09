@@ -258,8 +258,11 @@ class AvatarGenerator:
 
                     # Ricostruzione x_0 e rumore dalla velocita predetta (v-parameterization, R3)
                     pred_x0 = self.reverse_process.predict_x0_from_v(x, predicted_v, t)
-                    predicted_noise = self.reverse_process.predict_noise_from_v(x, predicted_v, t)
                     pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+                    
+                    # Recalculate predicted_noise using the clipped pred_x0 to avoid accumulation of errors
+                    alpha_bar_t = self.reverse_process._extract(self.reverse_process.alpha_bars, t, x)
+                    predicted_noise = (x - torch.sqrt(alpha_bar_t) * pred_x0) / torch.sqrt(1.0 - alpha_bar_t)
 
                     if t_prev_val is None:
                         x = pred_x0
@@ -334,7 +337,7 @@ def parse_args():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="a cartoon avatar with white skin, wavy hair, dark eyes, glasses, and no beard",
+        default="a cartoon avatar with pale skin, blond hair, dark eyes, glasses, and no beard",
         help="Prompt testuale per condizionare la generazione dell'avatar"
     )
     parser.add_argument(
@@ -358,7 +361,7 @@ def parse_args():
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=3,
+        default=30,
         help="Numero di step per il campionamento accelerato DDIM (default: 50)"
     )
     parser.add_argument(
