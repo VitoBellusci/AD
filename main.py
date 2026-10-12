@@ -258,8 +258,8 @@ def main(args=None):
         ema_unet = create_ema_model(unet, decay=parsed_args.ema_decay, device=device)
         print(f"EMA UNet inizializzato con decay={parsed_args.ema_decay}")
 
-    # unet = torch.nn.DataParallel(unet)
-    # text_encoder = torch.nn.DataParallel(text_encoder)
+    unet = torch.nn.DataParallel(unet)
+    text_encoder = torch.nn.DataParallel(text_encoder)
     
     # 7. Inizializzazione Processo di Diffusione (Forward)
     forward_process = DiffusionForwardProcess(num_time_steps=1000, device=device)
