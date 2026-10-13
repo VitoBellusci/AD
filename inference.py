@@ -337,7 +337,7 @@ def parse_args():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="a cartoon avatar with pale skin, blond hair, dark eyes, glasses, and no beard",
+        default="a cartoon avatar with pale skin, blonde hair, dark eyes, round glasses, and no facial hair",
         help="Prompt testuale per condizionare la generazione dell'avatar"
     )
     parser.add_argument(
@@ -349,7 +349,7 @@ def parse_args():
     parser.add_argument(
         "--guidance_scale",
         type=float,
-        default=3.5,
+        default=4,
         help="Scala per Classifier-Free Guidance (CFG)"
     )
     parser.add_argument(
@@ -361,7 +361,7 @@ def parse_args():
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=30,
+        default=100,
         help="Numero di step per il campionamento accelerato DDIM (default: 50)"
     )
     parser.add_argument(
