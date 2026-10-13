@@ -96,7 +96,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 128)")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate (default: 5e-5)")
     parser.add_argument("--cfg_drop_rate", type=float, default=0.1, help="CFG dropout rate (default: 0.1)")
-    default_ckpt_dir = "/kaggle/working" if os.path.exists("/kaggle/input/models/vitobellu/epoc/other/default/1/checkpoint_epoch_65.pt") else "checkpoints"
+    default_ckpt_dir = "/kaggle/input/models/vitobellu/epoc/other/default/1/" if os.path.exists("/kaggle/input") else "checkpoints"
     parser.add_argument("--checkpoint_dir", type=str, default=default_ckpt_dir, help="Directory for checkpoints")
     parser.add_argument("--resume", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--max_steps", type=int, default=None, help="Max steps per epoch for fast dummy/verification run")
@@ -429,7 +429,7 @@ def main(args=None):
         scheduler=scheduler,
         epochs=parsed_args.epochs,
         device=device,
-        checkpoint_dir="/kaggle/working/",
+        checkpoint_dir="/kaggle/working",
         start_epoch=start_epoch,
         conditional=conditional_mode,
         cfg_drop_rate=parsed_args.cfg_drop_rate,
