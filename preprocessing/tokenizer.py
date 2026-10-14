@@ -7,8 +7,7 @@ class AvatarTokenizer:
     """
     Tokenizer deterministico per didascalie generate da metadati di avatar.
     Preserva i token speciali nei primi 4 ID (0..3) e garantisce coerenza
-    totale di sanitizzazione (lowercase, rimozione punteggiatura, split whitespace)
-    tra fit ed encode.
+    totale di sanitizzazione
     """
     def __init__(self, config=None):
         self.config = config
@@ -26,10 +25,10 @@ class AvatarTokenizer:
 
     def fit(self, training_texts: List[str]):
         """
-        Costruisce il vocabolario preservando i token speciali (ID 0..3).
+        Costruisce il vocabolario preservando i token speciali.
         I nuovi token partono tassativamente da ID 4.
         """
-        word_count = max(self.vocab.values())  # Inizia da 3 -> il primo token aggiunto avra ID 4
+        word_count = max(self.vocab.values())  # Inizia da 3: il primo token aggiunto avra ID 4
         for text in training_texts:
             tokens = self._tokenize(text)
             for token in tokens:
@@ -41,21 +40,21 @@ class AvatarTokenizer:
 
     def encode(self, text: str) -> List[int]:
         """
-        Converte una stringa in una sequenza di indici interi.
-        Utilizza esattamente la stessa routine _tokenize di fit() per garantire coerenza totale.
-        Applica padding o troncamento a max_seq_len.
+        Converte una stringa in un tensore PyTorch di interi.
         """
         tokens = self._tokenize(text)
         encoded = [self.vocab.get(token, self.vocab["<UNK>"]) for token in tokens]
 
-        # Padding o Truncation al valore max_seq_len
         max_seq_len = 20
         if self.config is not None:
+            # controlla che sia un dizionario
             if isinstance(self.config, dict):
                 max_seq_len = self.config.get("max_seq_len", 20)
             else:
+                # getattr permette di leggere un attributo da un oggetto tramite una stringa
                 max_seq_len = getattr(self.config, "max_seq_len", 20)
-
+        
+        # Padding o Truncation al valore max_seq_len
         if len(encoded) < max_seq_len:
             encoded += [self.vocab["<PAD>"]] * (max_seq_len - len(encoded))
         else:
