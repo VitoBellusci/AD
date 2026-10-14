@@ -4,14 +4,17 @@ from typing import Dict, Any, Optional
 class _SafeDict(dict):
     """
     Dizionario sicuro che restituisce un fallback descrittivo naturale per 
-    eventuali segnaposto imprevisti nel template.
+    eventuali segnaposto imprevisti nel template. Si tratta di una classe personalizzata che estende
+    il dizionario standard, sovrascrivendo il metodo __missing__ quando si cerca una chiave che non esiste nel dizionario.
+    Invece di far esplodere il codice, intercetta la richiesta mancante e restituisce la stringa natural, che non modifica in maniera esagerata
+    il significato della frase, restituendo sempre una frase di senso compiuto.
     """
     def __missing__(self, key: str) -> str:
         return "natural"
 
 class CaptionGenerator:
     """
-    Generatore deterministico di didascalie in linguaggio naturale per Google Cartoon Set.
+    Generatore deterministico di didascalie per Google Cartoon Set.
     Mappa i metadati numerici delle categorie visive (face_color, hair, eye_color, glasses,
     facial_hair, ecc.) in descrittori semantici naturali, garantendo l'assenza totale di ID numerici.
     """
@@ -199,24 +202,34 @@ class CaptionGenerator:
         "2": "high"
     }
 
+    # Costituisce lo scheletro da dare al text encoder
     DEFAULT_TEMPLATE = (
         "a cartoon avatar with {face_color} skin, {hair} hair, "
         "{eye_color} eyes, {glasses}, and {facial_hair}"
     )
 
+    # la scelta sul template consente di usare il modello anche con prompt diversi
     def __init__(self, template: Optional[str] = None):
         self.template = template or self.DEFAULT_TEMPLATE
 
     @staticmethod
     def _normalize_metadata(metadata: Any) -> Dict[str, Any]:
-        """Normalizza le chiavi del dizionario metadati (lowercase, stripped). Supporta anche Mapping e DataFrame Series."""
+        """Sanitizza i dati in ingresso"""
+
+        # Controlla se si tratta di una Series o DataFrame pandas, cercando se l'oggetto in ingresso possiede
+        # il metodo to_dict chiamabile. Successivamente lo converte in dizionario
         if hasattr(metadata, "to_dict") and callable(metadata.to_dict):
             try:
                 metadata = metadata.to_dict()
             except Exception:
                 pass
+
+        # Controlla che sia un dizionario
         if hasattr(metadata, "items") and callable(metadata.items):
             try:
+                # -trasforma la chiave in stringa
+                # -rimuove eventuali spazi vuoti
+                # -converte tutto in lettere minuscole
                 return {str(k).strip().lower(): v for k, v in metadata.items()}
             except Exception:
                 pass
@@ -224,14 +237,20 @@ class CaptionGenerator:
             return {}
         return {str(k).strip().lower(): v for k, v in metadata.items()}
 
+    """
+    L'utilizzo di questo decoratore, porta con sé l'utilizzo del parametro cls, passato come primo argomento
+    Esso porta consiste nella classe stessa (CaptionGenerator). In questo modo il metodo può essere chiamato senza
+    dover prima istanziare un oggetto CaptionGenerator. Utile nel caso in cui una sottoclasse dovesse sovrascrivere il metodo
+    o accedere ad attributi di classe
+    """
     @classmethod
     def _extract_and_resolve(
         cls,
-        normalized_meta: Dict[str, Any],
-        aliases: list,
-        mapping: Dict[str, str],
-        default_key: str,
-        fallback_descriptor: str
+        normalized_meta: Dict[str, Any],    # dizionario metadati pulito
+        aliases: list,                      # possibili nomi della colonna per lo stesso attributo
+        mapping: Dict[str, str],            # il dizionario di traduzione
+        default_key: str,                   # l'ID di default se il dato manca
+        fallback_descriptor: str            # la parola d'emergenza
     ) -> str:
         """
         Estrae un valore dai metadati provando una lista di alias,
@@ -242,6 +261,7 @@ class CaptionGenerator:
         raw_val = None
         for alias in aliases:
             if alias in normalized_meta:
+                # Se la chiave esiste, estrae il valore associato
                 raw_val = normalized_meta[alias]
                 break
 
@@ -251,29 +271,44 @@ class CaptionGenerator:
         val_str = str(raw_val).strip()
         # Normalizzazione numerica: float interi (es. 98.0 -> "98")
         try:
+            # Convertire in float inizialmente, evita la generazione di errori nel caso in cui si ha una 
+            # stringa "98.0": eseguire direttamente l'operazione che converte in int può generare un ValueError.
+            # Inoltre, passare da un float permette di usare il metodo .is_integer()
             f = float(val_str)
             if f.is_integer():
                 val_str = str(int(f))
         except (ValueError, OverflowError):
             pass
 
-        # 1. Ricerca diretta per chiave ID (es. "98" -> "wavy")
+        # Ricerca diretta per chiave ID (es. "98" -> "wavy")
         if val_str in mapping:
             return mapping[val_str]
 
-        # 2. Se il valore fornito e' gia' un descrittore semantico valido (es. "wavy", "round", "round glasses")
+        # Se il valore fornito e' gia' un descrittore semantico valido e non un numero (es. "wavy", "round", "round glasses")
         val_lower = val_str.lower()
+
+        # I dizionari contengono solo gli aggettivi e alcuni riprendono anche il sostantivo
         val_clean = val_lower.replace(" hair", "").replace(" style", "").replace(" beard", "").replace(" glasses", "").replace(" eyes", "").replace(" eye", "").strip()
         for v in mapping.values():
             v_lower = v.lower()
             v_clean = v_lower.replace(" hair", "").replace(" style", "").replace(" beard", "").replace(" glasses", "").replace(" eyes", "").replace(" eye", "").strip()
             if (val_lower == v_lower or 
+                
+                # Verifica dapprima che val_clean non sia vuota per poi controllare con il valore del dizionario non ripulito
                 (val_clean and val_clean == v_lower) or 
+
+                # prima verifica che le due stringhe non siano vuote e successivamente verifica che siano identiche
                 (val_clean and v_clean and val_clean == v_clean) or 
+
                 (v_clean and val_lower == v_clean)):
+
+                # Non appena scatta una solo di queste condizioni, il metodo restituisce la stringa immacolata presente nel dizionario
+                # di mapping. Questo perché ogni valore v nei dizionari elencati all'inizio della classe sono stati progettati su misura per il default template
                 return v
 
-        # 3. Fallback semantico per chiavi sconosciute, negative o anomale (nessun ID numerico nel testo)
+        # Fallback semantico per chiavi sconosciute, negative o anomale (nessun ID numerico nel testo)
+        # Cerca inizialmente l'ID di default per quella categoria (colore pelle, occhiali, ...), se non trova nulla nel dizionario
+        # restituisce il fallback_descriptor
         return mapping.get(default_key, fallback_descriptor)
 
     @classmethod
@@ -282,7 +317,8 @@ class CaptionGenerator:
         Restituisce una lista di testi canonici che coprono tutti i descrittori semantici
         delle categorie visive e i prompt OOD / di default.
         Garantisce che il vocabolario del tokenizer contenga tutti i token necessari,
-        anche se addestrato su un sottoinsieme limitato di dati.
+        anche se addestrato su un sottoinsieme limitato di dati, elaborando preventivamente ogni descrittore
+        semantico esistente nel dataset
         """
         prompts = [
             cls().generate({}),
@@ -305,6 +341,8 @@ class CaptionGenerator:
         try:
             norm_meta = self._normalize_metadata(metadata)
 
+            # La default key passata è generalmente 0, che rappresenta quasi sempre il valore di default per 
+            # quella caratteristica visiva. Lo si fa perché possono esserci dei valori corrotti, nulli o mancanti
             face_desc = self._extract_and_resolve(
                 norm_meta, ['face_color', 'face', 'skin', 'face_tone', 'skin_color'],
                 self.FACE_COLORS, '0', 'porcelain'
@@ -420,6 +458,7 @@ class CaptionGenerator:
                 'eyebrow_distance': eye_eyebrow_dist_desc,
             })
 
+            # con questo metodo si inseriscono i valori corretti nel template
             caption = self.template.format_map(format_dict)
             # Rimozione di sicurezza di eventuali cifre numeriche residue
             caption = re.sub(r'\b\d+\b', '', caption)
@@ -432,4 +471,8 @@ class CaptionGenerator:
             return "a cartoon avatar with natural features and no glasses"
 
     def __repr__(self) -> str:
+        """
+        Restituisce una rappresentazione ufficiale e univoca dell'oggetto
+        """
+
         return f"CaptionGenerator(template='{self.template}')"
