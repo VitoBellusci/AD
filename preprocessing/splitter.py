@@ -25,12 +25,16 @@ class CompositionalSplitter:
         blocked_sets = []
         for combo in raw_blocked:
             if isinstance(combo, set):
+                # ciascuna combinazione bloccata viene convertita in un set di tuple
                 blocked_sets.append({(str(k), str(v)) for k, v in combo})
             else:
                 blocked_sets.append({(str(x[0]), str(x[1])) for x in combo})
 
         for idx, meta in enumerate(metadata_list):
             current_comb = {(str(k), str(v)) for k, v in meta.items()}
+
+            # any verifica se una qualsiasi delle combinazioni bloccate è interamente contenuta (issubset)
+            # nel campione corrente
             is_ood = any(
                 blocked_set.issubset(current_comb) 
                 for blocked_set in blocked_sets
@@ -51,7 +55,7 @@ class CompositionalSplitter:
         test_ind_indices = train_indices[val_size:val_size + test_size]
         final_train_indices = train_indices[val_size + test_size:]
 
-        # Salva le partizioni su disco per esatta riproducibilità
+        # Salva le partizioni su disco per esatta riproducibilità, efficienza computazionale nel confronto insiemistico tramite .issubset()
         splits = {
             "train": final_train_indices,
             "val": val_indices,
