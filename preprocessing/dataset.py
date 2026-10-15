@@ -11,6 +11,7 @@ class AvatarDataset(Dataset):
     """
     Creiamo il dataset effettivo che integra l'immagine ed il testo. Questa classe si assicura che l'immagine sia
     normalizzata tra [-1, 1] e che la caption sia tokenizzata usando soltanto il vocabolario costruito con il set di training
+    Per creare un custom dataset è obbligatorio ereditare da questa classe e implementare tre metodi: __init__, __len__, __getitem__
     """
 
     def __init__(
@@ -91,6 +92,8 @@ class AvatarDataset(Dataset):
         caption_tokens = self.tokenizer.encode(
             caption_text
         )
+
+        # il tipo torch.long è richiesto dai layer di nn.EMbedding dei modelli transformer
         caption_tensor = torch.tensor(caption_tokens, dtype=torch.long)
 
         return image_tensor, caption_tensor

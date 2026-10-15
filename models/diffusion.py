@@ -5,8 +5,9 @@ import math
 class DiffusionScheduler:
     """
     Classe base per gestire lo scheduling del rumore.
-    Supporta sia il Cosine Scheduler (Nichol & Dhariwal, 2021) che il Linear Scheduler (Ho et al., 2020)
-    per gestire la varianza del rumore.
+    Supporta sia il Cosine Scheduler che il Linear Scheduler per gestire la varianza del rumore.
+    Il Cosine Scheduler è l'approccio predefinito, introdotto per prevenire una distruzione troppo rapida 
+    dell'immagine nei primi step.
     """
     def __init__(self, num_time_steps=1000, s=0.008, schedule_type="cosine", beta_start=1e-4, beta_end=0.02, device="cpu"):
         self.num_time_steps = num_time_steps
@@ -16,10 +17,13 @@ class DiffusionScheduler:
         if schedule_type == "cosine":
             # Calcolo di alpha_bar usando la formula del cosine scheduler:
             # f(t) = cos(((t/T + s) / (1 + s)) * (pi/2))^2
+            # L'utilizzo di steps nell'equazione, vettorializza il calcolo, permettendo di calcolare la curva base
+            # per la distruzione dell'immagine simultaneamente per tutti gli istanti temporali, evitando l'uso di cicli iterativi lenti
             steps = torch.arange(num_time_steps + 1, dtype=torch.float32, device=self.device)
             f_t = torch.cos(((steps / num_time_steps + s) / (1 + s)) * (math.pi / 2))**2
 
-            # Questo tensore viene normalizzato, assicurando che allo step t = 0 il valore sia esattamente 1.0.
+            # Questo tensore viene normalizzato, assicurando che allo step t = 0 il valore sia esattamente 1.0, cioè che il processo di diffusione
+            # cominci con il 100% del segnale originale intatto, senza alcuna corruzione preventiva.
             # Esso contiene la frazione totale del segnale originale, sopravvissuta dopo t iniezioni di rumore
             ab_full = f_t / f_t[0]    
 
@@ -33,6 +37,7 @@ class DiffusionScheduler:
             betas = 1 - alphas    # betas contiene le quote di informazione visiva cancellate
 
             # Clipping delle beta per evitare instabilità numeriche (singolarità vicino a t=T)
+            # Qui beta_t può avvicinarsi a 1.0, causando instabilità numeriche o singolarità
             self.betas = torch.clamp(betas, max=0.999).to(self.device)
 
             # Ricalcolo di alphas e alpha_bars dopo il clipping per coerenza matematica
@@ -54,7 +59,16 @@ class DiffusionScheduler:
         self.inv_sqrt_alphas = 1 / torch.sqrt(self.alphas)
         self.beta_over_sqrt_one_minus_alpha_bar = self.betas / torch.sqrt(1 - self.alpha_bars)
 
-        # Pre-calcolo per la formulazione corretta di reverse sampling con clipping di x_0 (Ho et al. 2020 Eq. 12)
+        # Pre-calcolo per la formulazione corretta di reverse sampling con clipping di x_0.
+        # Si costruisce il tensore shiftato concatenando il valore 1.0 all'inizio della sequenza alpha_bars.
+        # Questi coefficienti sono necessari per ricondizionare l'immagine denoised
+
+        """
+        Durante la generazione, ricondizionare significa calcolare matematicamente lo stato intermedio corretto x_(t-1) fondendo la previsione
+        dell'immagine finale completamente pulita con lo stato rumoroso attuale. La media a posteriori calcola un punto di equilibrio esatto.
+        Nel metodo sample, coef1 tira l'immagine verso la destinazione finala stimata dal modello neurale, mentre il secondo coefficiente ancora
+        l'immagine allo stato rumoroso corrente, che funge da ponte strutturale sicuro
+        """
         self.alphas_cumprod_prev = torch.cat([torch.tensor([1.0], device=self.device), self.alpha_bars[:-1]]).to(self.device)
         self.posterior_mean_coef1 = (self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alpha_bars)).to(self.device)
         self.posterior_mean_coef2 = ((1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alpha_bars)).to(self.device)
@@ -189,4 +203,4 @@ class DiffusionReverseProcess(DiffusionScheduler):
         while nonzero_mask.ndim < x.ndim:
             nonzero_mask = nonzero_mask.unsqueeze(-1)
         sigma_t = torch.sqrt(torch.clamp(beta_t, min=1e-20))
-        return mean + nonzero_mask * sigma_t * z
+        return mean + nonzero_mask * sigma_t * z
