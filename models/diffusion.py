@@ -44,7 +44,7 @@ class DiffusionScheduler:
             self.alphas = 1 - self.betas
             self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         elif schedule_type == "linear":
-            # Linear beta schedule di Ho et al. (2020) (1e-4 a 0.02)
+            # Linear beta schedule
             self.betas = torch.linspace(beta_start, beta_end, num_time_steps, dtype=torch.float32, device=self.device)
             self.alphas = 1.0 - self.betas
             self.alpha_bars = torch.cumprod(self.alphas, dim=0)
@@ -76,15 +76,20 @@ class DiffusionScheduler:
     def _extract(self, coef_tensor, t, target_tensor):
         """
         Estrae i coefficienti al timestep t e ne effettua il broadcast
-        compatibile con la dimensione e il tipo di target_tensor
-        (supporta t int, float, list, tuple, 0D, 1D o tensori multidimensionali).
+        compatibile con la dimensione e il tipo di target_tensor.
+        Controlla che t non sia già un tensore ed in tal caso lo trasforma 
         """
         if not isinstance(t, torch.Tensor):
             t = torch.as_tensor(t, dtype=torch.long, device=coef_tensor.device)
         else:
             t = t.to(device=coef_tensor.device, dtype=torch.long)
+
+        # Appiattimento del tensore per estrarre facilmente i valori tramite indicizzazione
         t = t.flatten()
         coef = coef_tensor[t].to(device=target_tensor.device, dtype=target_tensor.dtype)
+
+        # Ciclo di broadcasting: finché il numero di dimensioni del coefficiente è minore di quello dell'immagine
+        # bersaglio, aggiunge dimensioni vuote alla fine del tensore
         while coef.ndim < target_tensor.ndim:
             coef = coef.unsqueeze(-1)
         return coef
@@ -94,6 +99,8 @@ class DiffusionScheduler:
         Calcola il target di velocita (v) per v-prediction.
         Formula: v = sqrt(alpha_bar_t) * noise - sqrt(1 - alpha_bar_t) * original
         """
+
+        # Check device e dtype
         if noise.device != original.device or noise.dtype != original.dtype:
             noise = noise.to(device=original.device, dtype=original.dtype)
         sqrt_alpha_bar_t = self._extract(self.sqrt_alpha_bars, t, original)
@@ -102,7 +109,7 @@ class DiffusionScheduler:
 
     def predict_x0_from_v(self, x, v, t):
         """
-        Ricostruisce x_0 dalla velocita (v) predetta per v-parameterization:
+        Ricostruisce x_0 dalla velocita predetta per v-parameterization, essendo un'operazione invertibile:
         x_0 = sqrt(alpha_bar_t) * x - sqrt(1 - alpha_bar_t) * v
         """
         if v.device != x.device or v.dtype != x.dtype:
@@ -111,24 +118,17 @@ class DiffusionScheduler:
         sqrt_one_minus_alpha_bar_t = self._extract(self.sqrt_one_minus_alpha_bars, t, x)
         return (sqrt_alpha_bar_t * x) - (sqrt_one_minus_alpha_bar_t * v)
 
-    def predict_noise_from_v(self, x, v, t):
-        """
-        Ricostruisce il rumore (epsilon) dalla velocita (v) predetta per v-parameterization:
-        epsilon = sqrt(alpha_bar_t) * v + sqrt(1 - alpha_bar_t) * x
-        """
-        if v.device != x.device or v.dtype != x.dtype:
-            v = v.to(device=x.device, dtype=x.dtype)
-        sqrt_alpha_bar_t = self._extract(self.sqrt_alpha_bars, t, x)
-        sqrt_one_minus_alpha_bar_t = self._extract(self.sqrt_one_minus_alpha_bars, t, x)
-        return (sqrt_alpha_bar_t * v) + (sqrt_one_minus_alpha_bar_t * x)
-
 
 class DiffusionForwardProcess(DiffusionScheduler):
 
-    # Questo metodo riceve l'immagine originale, il rumore gaussiano e il tensore t
+    """
+    Questo metodo riceve l'immagine originale, il rumore gaussiano e il tensore t ed implementa il processo
+    di corruzione dell'immagine    
+    """
     def add_noise(self, original, noise, t):
         """
-        Applica il rumore direttamente al tempo t partendo da x_0.
+        Applica il rumore direttamente al tempo t partendo da x_0, invece di applicarlo iterativamente passo
+        dopo passo da 0 a t.
         Formula: x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
         """
         if noise.device != original.device or noise.dtype != original.dtype:
@@ -140,20 +140,22 @@ class DiffusionForwardProcess(DiffusionScheduler):
 
 class DiffusionReverseProcess(DiffusionScheduler):
     """
-    Gestisce la rimozione del rumore (Processo di Generazione).
+    Gestisce la rimozione del rumore nella fase di inferenza.
     """
     def sample(self, model, x, t, context=None, uncond_context=None, 
                mask=None, uncond_mask=None, guidance_scale=3.0, noise_free=False, clip_denoised=True):
-        """
-        Esegue un singolo step di campionamento inverso con Classifier-Free Guidance e Dynamic Range Clipping,
-        assumendo che il modello predica la velocita (v-parameterization, R2).
-        """
+
         # Normalizzazione difensiva di t a 1D tensor compatibile con batch e device di x
         if not isinstance(t, torch.Tensor):
             t = torch.as_tensor(t, device=x.device, dtype=torch.long)
         else:
             t = t.to(device=x.device, dtype=torch.long)
         t = t.flatten()
+
+        # la funzione numel(): number of elements, conta quanti valori sono contenuti nel tensore.
+        # La condizione verifica se è stato passato un singolo instante temporale per l'intera chiamata. In tal caso,
+        # il vettore viene clonato per riempire un nuovo vettore della stessa lunghezza del batch.
+        # E' necessario sapere a che istante temporale si trovano tutte le immagini processate nel batch
         if t.numel() == 1:
             t = t.repeat(x.shape[0])
         elif t.shape[0] != x.shape[0]:
@@ -181,9 +183,8 @@ class DiffusionReverseProcess(DiffusionScheduler):
         # 2. Coefficienti per lo step t corrente
         beta_t = self._extract(self.betas, t, x)
 
-        # 3. Ricostruzione di x_0 e del rumore da velocita (v) predetta (v-parameterization, R2)
+        # 3. Ricostruzione di x_0 da velocita (v) predetta (v-parameterization, R2)
         pred_x0 = self.predict_x0_from_v(x, predicted_v, t)
-        pred_noise = self.predict_noise_from_v(x, predicted_v, t)
 
         # 4. Dynamic Range Clipping: ancora la traiettoria al dominio dell'immagine [-1.0, 1.0]
         if clip_denoised:
