@@ -161,47 +161,64 @@ class DiffusionReverseProcess(DiffusionScheduler):
         elif t.shape[0] != x.shape[0]:
             raise ValueError(f"Timestep tensor batch size ({t.shape[0]}) does not match input x batch size ({x.shape[0]}).")
 
-        # 1. Classifier-Free Guidance (CFG) con concatenazione sicura delle maschere
+        """ 
+        Classifier-Free Guidance (CFG) con concatenazione delle maschere
+        Quando è attiva, la rete neurale valuta sia l'immagine guidata dal prompt, sia l'immagine
+        incondizionata
+        """        
         if guidance_scale > 1.0 and context is not None and uncond_context is not None:
+            # gli input base vengono estesi, incollandosi a se stessi
             x_input = torch.cat([x, x], dim=0)
             t_input = torch.cat([t, t], dim=0)
+            # Concatenazione dei contesti
             context_input = torch.cat([context, uncond_context], dim=0)
             
             mask_input = None
             if mask is not None and uncond_mask is not None:
                 mask_input = torch.cat([mask, uncond_mask], dim=0)
             elif mask is not None:
+                # Rimpiazzo neutro nel caso in cui manca la maschera incondizionata
                 uncond_m = torch.ones_like(mask)
                 mask_input = torch.cat([mask, uncond_m], dim=0)
                 
             model_out = model(x_input, t_input, context=context_input, mask=mask_input)
+            # Divisione a metà esatta lungo la dimensione del batch size
             v_cond, v_uncond = torch.chunk(model_out, 2, dim=0)
+            # Questo calcolo allontana la direzione del vettore da quella incondizionata, spingendo
+            # la predizione verso i dettagli richiesti dal contesto in modo proporzionale al fattore di guidance
             predicted_v = v_uncond + guidance_scale * (v_cond - v_uncond)
         else:
             predicted_v = model(x, t, context=context, mask=mask)
 
-        # 2. Coefficienti per lo step t corrente
+        # Coefficienti per lo step t corrente
         beta_t = self._extract(self.betas, t, x)
 
-        # 3. Ricostruzione di x_0 da velocita (v) predetta (v-parameterization, R2)
+        # Ricostruzione di x_0 da velocita (v) predetta (v-parameterization, R2)
         pred_x0 = self.predict_x0_from_v(x, predicted_v, t)
 
-        # 4. Dynamic Range Clipping: ancora la traiettoria al dominio dell'immagine [-1.0, 1.0]
+        # Dynamic Range Clipping: ancora la traiettoria al dominio dell'immagine [-1.0, 1.0]
+        # necessario soprattuto nelle prime fasi, quando t è molto alto e l'immagine è puramente rumorosa
         if clip_denoised:
+            # Quando la rete esegue la sua stima ed estrapola i pixel originali, alcuni potrebbero assumere valori 
+            # anomali che superano il dominio di colore standard (normalizzato tra -1.0 e 1.0). Calcolando la media con questi pixel,
+            # si sballerebbero le previsioni calcolate agli istanti successivi
             pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
 
-        # 5. Calcolo della media a posteriori mu_theta da pred_x0 clippato
+        # Calcolo della media a posteriori mu_theta da pred_x0 clippato
         coef1 = self._extract(self.posterior_mean_coef1, t, x)
         coef2 = self._extract(self.posterior_mean_coef2, t, x)
         mean = coef1 * pred_x0 + coef2 * x
 
-        # 6. Condizione terminale per t=0 e iniezione di rumore Langevin (stabilità con clamp min=1e-20)
+        # Iniezione di rumore Langevin per calcolare lo stato x_(t-1), con controllo per t=0
         if noise_free:
             return mean
 
         z = torch.randn_like(x)
+        # All'istante t=0 si deve ottenere l'immagine perfettamente pulita.
         nonzero_mask = (t > 0).to(dtype=x.dtype)
         while nonzero_mask.ndim < x.ndim:
             nonzero_mask = nonzero_mask.unsqueeze(-1)
+
+        # Definizione della deviazione standard del rumore per prevenire NaN
         sigma_t = torch.sqrt(torch.clamp(beta_t, min=1e-20))
         return mean + nonzero_mask * sigma_t * z
