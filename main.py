@@ -22,7 +22,7 @@ from train import train, set_seed, create_ema_model, strip_prefix
 
 def resolve_checkpoint(checkpoint_dir: str = "checkpoints", explicit_path: str = None) -> str:
     """
-    Risoluzione del checkpoint in modo deterministico ordinando per indice numerico di epoca,
+    Risoluzione del checkpoint in modo deterministico ordinando per indice numerico di epoca
     """
     if explicit_path:
         if os.path.exists(explicit_path):
@@ -42,6 +42,7 @@ def resolve_checkpoint(checkpoint_dir: str = "checkpoints", explicit_path: str =
         match = re.search(r'checkpoint_epoch_(\d+)\.pt', os.path.basename(path))
         return int(match.group(1)) if match else -1
 
+    # Confronta i valori restituiti da extract_epoch (i numeri dell'epoca), che sono associati ad ogni percorso
     return max(available, key=extract_epoch)
 
 def configure_optimizers(
@@ -53,10 +54,10 @@ def configure_optimizers(
     total_epochs: int = 50
 ):
     """
-    Configura l'ottimizzatore AdamW con weight decay disaccoppiato (Blueprint 3.1, DEF-19):
+    Configura l'ottimizzatore AdamW con weight decay disaccoppiato:
     - Parametri con ndim >= 2 ricevono weight_decay.
     - Parametri con ndim <= 1, bias e norm ricevono weight_decay = 0.0.
-    Scheduler: LinearLR warmup concatenato a CosineAnnealingLR via SequentialLR.
+    Scheduler: LinearLR warmup concatenato a CosineAnnealingLR.
     """
     decay_params = []
     no_decay_params = []
@@ -76,6 +77,11 @@ def configure_optimizers(
     ]
     optimizer = optim.AdamW(optim_groups, lr=lr)
 
+    """
+    Lo scheduling del lr avviene in due fasi sequenziali:
+    - Crescita lineare nei primi (grandi) passi
+    - Cosine che applica una discesa fluida per raggiungere il minimo
+    """
     warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
     cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_epochs - warmup_epochs))
     scheduler = optim.lr_scheduler.SequentialLR(
@@ -260,7 +266,7 @@ def main(args=None):
     """
     Inizializzazione EMA UNet
     L'aggiornamento dei pesi può risultare caotico, motivo per cui è stato implementanta questa tecnica che mantiene una copia della reta i cui pesi
-    mon vengono aggiornati dai gradienti ma calcolati come media mobile dei pesi storici
+    non vengono aggiornati dai gradienti ma calcolati come media mobile dei pesi storici
     """
     ema_unet = None
     if parsed_args.use_ema:
@@ -286,7 +292,7 @@ def main(args=None):
         total_epochs=parsed_args.epochs
     )
 
-    # 9. Logica di ricerca e caricamento del Checkpoint con regex (Blueprint 3.2, DEF-20)
+    # Logica di ricerca e caricamento del Checkpoint con regex
     checkpoint_dir = parsed_args.checkpoint_dir
     os.makedirs(checkpoint_dir, exist_ok=True)
     try:
