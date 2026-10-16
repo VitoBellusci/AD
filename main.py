@@ -257,16 +257,22 @@ def main(args=None):
         context_dim=256
     ).to(device)
 
-    # Inizializzazione EMA UNet (R1)
+    """
+    Inizializzazione EMA UNet
+    L'aggiornamento dei pesi può risultare caotico, motivo per cui è stato implementanta questa tecnica che mantiene una copia della reta i cui pesi
+    mon vengono aggiornati dai gradienti ma calcolati come media mobile dei pesi storici
+    """
     ema_unet = None
     if parsed_args.use_ema:
+        # Al passo t, i pesi sono calcolati mantenendo il "decay" (es. 0.999) del valore precedente ed integrando solo la restante parte
+        # dei nuovi pesi della UNet
         ema_unet = create_ema_model(unet, decay=parsed_args.ema_decay, device=device)
         print(f"EMA UNet inizializzato con decay={parsed_args.ema_decay}")
 
     unet = torch.nn.DataParallel(unet)
     text_encoder = torch.nn.DataParallel(text_encoder)
     
-    # 7. Inizializzazione Processo di Diffusione (Forward)
+    # Inizializzazione Processo di Diffusione (Forward)
     forward_process = DiffusionForwardProcess(num_time_steps=1000, device=device)
     start_epoch = 0
 
@@ -303,7 +309,7 @@ def main(args=None):
 
         raw_unet.load_state_dict(unet_weights)
 
-        # Gestione retrocompatibilita dimensioni vocabolario tra checkpoint e tokenizer attuale
+        # Gestione retrocompatibilità dimensioni vocabolario tra checkpoint e tokenizer attuale
         embed_key = None
         if 'embed.embedding.weight' in text_encoder_weights:
             embed_key = 'embed.embedding.weight'
@@ -331,18 +337,23 @@ def main(args=None):
         except Exception as opt_err:
             print(f"Avviso: Impossibile ripristinare stato ottimizzatore ({opt_err}), proseguo con nuovo ottimizzatore.")
 
-        # Ripristino pesi EMA UNet (R2)
+        # Ripristino pesi EMA UNet
         if ema_unet is not None:
+            # L'architettura UNet di base vera e propria
             raw_ema = ema_unet
+            # Rimozione dai wrapper di parallelizzazione
             while hasattr(raw_ema, 'module'):
                 raw_ema = raw_ema.module
 
+            # Oggetto che gestirà la media mobile e che contiene il contatore degli step
             avg_model = ema_unet
+            # se un checkpoint è stato salvato senza DataParallel, caricarlo in un modello avvolto da module. 
+            # genererebbe un errore di incompatibilità delle chiavi.
             while hasattr(avg_model, 'module') and not hasattr(avg_model, 'n_averaged'):
                 avg_model = avg_model.module
 
             ema_loaded = False
-            # 1. Tentativo di ripristino diretto dello stato completo AveragedModel
+            # Tentativo di ripristino diretto dello stato completo AveragedModel
             if 'ema_state_dict' in checkpoint:
                 try:
                     avg_model.load_state_dict(checkpoint['ema_state_dict'])
@@ -351,11 +362,12 @@ def main(args=None):
                 except Exception as ema_err:
                     print(f"Avviso durante ripristino diretto ema_state_dict ({ema_err}), fallback su pesi unwrapped.")
 
-            # 2. Se il ripristino diretto fallisce o se è presente solo ema_unet_state_dict
+            # Se il ripristino diretto fallisce o se è presente solo ema_unet_state_dict
             if not ema_loaded:
                 weights_to_load = None
                 if 'ema_unet_state_dict' in checkpoint:
                     weights_to_load = strip_prefix(checkpoint['ema_unet_state_dict'])
+                    # Creazione di un nuovo dizionario senza la chiave "n_averaged". Questi pesi saranno passati alle altre archietture eccetto avg_model
                     weights_to_load = {k: v for k, v in weights_to_load.items() if k != 'n_averaged'}
                     print("Ripristino pesi EMA UNet da ema_unet_state_dict.")
                 elif 'ema_state_dict' in checkpoint:
@@ -365,12 +377,13 @@ def main(args=None):
 
                 if weights_to_load is not None:
                     try:
+                        # Iniezione dei pesi nella rete
                         raw_ema.load_state_dict(weights_to_load)
                         ema_loaded = True
                     except Exception as load_err:
                         print(f"Avviso durante caricamento pesi EMA su modulo base ({load_err}).")
 
-                # Ripristina il contatore n_averaged
+                # Ripristina il contatore n_averaged per sapere quanti aggiornamenti sono stati fatti
                 if ema_loaded and hasattr(avg_model, 'n_averaged'):
                     if 'ema_n_averaged' in checkpoint:
                         n_val = checkpoint['ema_n_averaged']
@@ -379,6 +392,7 @@ def main(args=None):
                         n_val = checkpoint['ema_state_dict']['n_averaged']
                         n_int = int(n_val.item() if hasattr(n_val, 'item') else n_val)
                     else:
+                        # Se non si trova da nessuna parte, viene settato a 1
                         n_int = 1
 
                     if isinstance(avg_model.n_averaged, torch.Tensor):
@@ -386,8 +400,9 @@ def main(args=None):
                     else:
                         avg_model.n_averaged = n_int
 
-            # 3. Fallback per checkpoint legacy senza stato EMA
+            # Fallback per checkpoint legacy senza stato EMA
             if not ema_loaded:
+                # caricamento dei pesi della UNet principale. EMA non deve avere i pesi casuali dell'inizializzazione
                 raw_ema.load_state_dict(raw_unet.state_dict())
                 if hasattr(avg_model, 'n_averaged'):
                     if isinstance(avg_model.n_averaged, torch.Tensor):
