@@ -477,13 +477,3 @@ def train(
         ema_unet.eval()
 
     return ema_unet
-
-
-if __name__ == "__main__":
-    import sys
-    from main import main, parse_args
-    parser = parse_args()
-    if "--epochs" not in sys.argv and "--max_steps" in sys.argv:
-        parser.set_defaults(epochs=1)
-    parsed_args, _ = parser.parse_known_args()
-    main(parsed_args)

@@ -22,8 +22,7 @@ from train import train, set_seed, create_ema_model, strip_prefix
 
 def resolve_checkpoint(checkpoint_dir: str = "checkpoints", explicit_path: str = None) -> str:
     """
-    Risolve il checkpoint in modo deterministico ordinando per indice numerico di epoca,
-    evitando la fragilità non portabile di os.path.getctime (Blueprint 3.2, DEF-20).
+    Risoluzione del checkpoint in modo deterministico ordinando per indice numerico di epoca,
     """
     if explicit_path:
         if os.path.exists(explicit_path):
@@ -308,6 +307,7 @@ def main(args=None):
         if embed_key is not None:
             ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
             embed_dim = text_encoder_weights[embed_key].shape[1]
+            # Sfrutto la proprietà embedding
             if ckpt_vocab_size != raw_text_encoder.embedding.num_embeddings:
                 raw_text_encoder.embed.embedding = torch.nn.Embedding(
                     ckpt_vocab_size, embed_dim
