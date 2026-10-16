@@ -172,9 +172,12 @@ def main(args=None):
     image_paths = []
 
     with open(csv_path, mode='r', encoding='utf-8') as f:
+        # L'utilizzo di questa classe, invece di un lettore standard, consente di interpretare automaticamente la prima riga del file CSV come
+        # riga di intestazione. Di conseguenza, ogni riga successiva viene restituita come un dizionario Python, dove le chiavi sono i nomi delle colonne
+        # e i valori sono i dati delle righe 
         reader = csv.DictReader(f)
         for row in reader:
-            # Estrae la stringa originale dal CSV (es. "0/cs12345.jpg")
+            # Estrae la stringa originale dal CSV (es. "0/cs12345.jpg") e contemporaneamente rimuove la coppia dal dizionario row
             raw_filename = row.pop('filename')
             
             # Unisce il percorso base con la sottocartella e il nome file
@@ -182,10 +185,10 @@ def main(args=None):
             full_path = os.path.join(image_dir, raw_filename)
             image_paths.append(full_path)
             
-            # Salva i restanti attributi come dizionario
+            # Salva i restanti attributi come dizionario come dizionari. Ci saranno soltanto gli attributi visivi grezzi
             raw_metadata.append(row)
 
-    # 3. Split Composizionale a 4 vie (DEF-01, DEF-09, DEF-13)
+    # Split Composizionale a 4 vie
     splitter = CompositionalSplitter(config)
     train_indices, val_indices, test_ind_indices, ood_indices = splitter.split(raw_metadata)
     print(f"Partizioni create: {len(train_indices)} train, {len(val_indices)} val, "
@@ -193,7 +196,7 @@ def main(args=None):
     
     train_metadata = [raw_metadata[i] for i in train_indices]
     
-    # 4. Generazione Didascalie e Fit del Tokenizer SOLO sul Training Set
+    # Generazione didascalie e fit del Tokenizer solo sul training set
     caption_gen = CaptionGenerator()
     train_texts = [caption_gen.generate(m) for m in train_metadata]
     
@@ -201,7 +204,7 @@ def main(args=None):
     tokenizer.fit(train_texts)
     tokenizer.save_vocab() # Salviamo il vocabolario per l'inferenza
     
-    # 5. Creazione del Dataset e DataLoader con Subset e val_loader (DEF-09, DEF-10)
+    # Creazione del dataset e dataLoader con subset e val_loader
     dataset = AvatarDataset(
         image_paths=image_paths,
         metadata=raw_metadata,
@@ -209,6 +212,9 @@ def main(args=None):
         config=config,
         use_ram_cache=False
     )
+
+    # Invece di duplicare i dati in memoria istanziando dataset separati, con la classe Subset, si generare dei dataset a partire dagli indici
+    # precedentemente estratti
     val_dataset = Subset(dataset, val_indices)
     train_dataset = Subset(dataset, train_indices)
     
@@ -222,8 +228,8 @@ def main(args=None):
         drop_last=(len(train_dataset) >= batch_size),
         num_workers=parsed_args.num_workers,
         pin_memory=(device == "cuda"),
-        prefetch_factor=2 if use_workers else None,
-        persistent_workers=use_workers
+        prefetch_factor=2 if use_workers else None, # il prefetching ordina a ciascun processo parallelo di preparare e caricare in RAM i batch successivi prima che la rete li richieda esplicitamente
+        persistent_workers=use_workers  # si forza la permanenza dei processi attivi
     )
     val_loader = DataLoader(
         val_dataset, 
@@ -234,7 +240,7 @@ def main(args=None):
         persistent_workers=use_workers
     )
     
-    # 6. Inizializzazione Modelli Architetturali
+    # Inizializzazione Modelli Architetturali
     vocab_size = len(tokenizer.vocab)
     text_encoder = FullTextEncoder(
         vocab_size=vocab_size, 

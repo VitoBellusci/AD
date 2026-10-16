@@ -118,6 +118,16 @@ class DiffusionScheduler:
         sqrt_one_minus_alpha_bar_t = self._extract(self.sqrt_one_minus_alpha_bars, t, x)
         return (sqrt_alpha_bar_t * x) - (sqrt_one_minus_alpha_bar_t * v)
 
+    def predict_noise_from_v(self, x, v, t):
+        """
+        Ricostruisce il rumore (epsilon) dalla velocita (v) predetta per v-parameterization:
+        epsilon = sqrt(alpha_bar_t) * v + sqrt(1 - alpha_bar_t) * x
+        """
+        if v.device != x.device or v.dtype != x.dtype:
+            v = v.to(device=x.device, dtype=x.dtype)
+        sqrt_alpha_bar_t = self._extract(self.sqrt_alpha_bars, t, x)
+        sqrt_one_minus_alpha_bar_t = self._extract(self.sqrt_one_minus_alpha_bars, t, x)
+        return (sqrt_alpha_bar_t * v) + (sqrt_one_minus_alpha_bar_t * x)
 
 class DiffusionForwardProcess(DiffusionScheduler):
 
