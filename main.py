@@ -266,7 +266,7 @@ def main(args=None):
     """
     Inizializzazione EMA UNet
     L'aggiornamento dei pesi può risultare caotico, motivo per cui è stato implementanta questa tecnica che mantiene una copia della reta i cui pesi
-    non vengono aggiornati dai gradienti ma calcolati come media mobile dei pesi storici
+    non vengono aggiornati dai gradienti ma calcolati come media mobile dei pesi storici (si tratta di un'interpolazione lineare)
     """
     ema_unet = None
     if parsed_args.use_ema:
@@ -275,14 +275,14 @@ def main(args=None):
         ema_unet = create_ema_model(unet, decay=parsed_args.ema_decay, device=device)
         print(f"EMA UNet inizializzato con decay={parsed_args.ema_decay}")
 
-    unet = torch.nn.DataParallel(unet)
-    text_encoder = torch.nn.DataParallel(text_encoder)
+    # unet = torch.nn.DataParallel(unet)
+    # text_encoder = torch.nn.DataParallel(text_encoder)
     
     # Inizializzazione Processo di Diffusione (Forward)
     forward_process = DiffusionForwardProcess(num_time_steps=1000, device=device)
     start_epoch = 0
 
-    # 8. Inizializza l'ottimizzatore e lo scheduler con configure_optimizers (Blueprint 3.1, DEF-19)
+    # Inizializza l'ottimizzatore e lo scheduler con configure_optimizers
     optimizer, scheduler = configure_optimizers(
         unet=unet,
         text_encoder=text_encoder,
@@ -323,14 +323,17 @@ def main(args=None):
             embed_key = 'embedding.weight'
 
         if embed_key is not None:
+            # Estrazione della vecchia grandezza del vocabolario
             ckpt_vocab_size = text_encoder_weights[embed_key].shape[0]
             embed_dim = text_encoder_weights[embed_key].shape[1]
-            # Sfrutto la proprietà embedding
+            # Sfrutto la proprietà embedding per confrontare il vocabolario del vecchio file con la dimensione che il modello attualmente
+            # istanziato si aspetta di ricevere
             if ckpt_vocab_size != raw_text_encoder.embedding.num_embeddings:
                 raw_text_encoder.embed.embedding = torch.nn.Embedding(
                     ckpt_vocab_size, embed_dim
                 ).to(device)
 
+            # Se nei checkpoint la chiave aveva il nome obsoleto, tramite il metodo .pop() si rimuovono i pesi dalla vecchia chiave per riassegnarli alla nuova
             if embed_key == 'embedding.weight' and 'embed.embedding.weight' not in text_encoder_weights:
                 text_encoder_weights['embed.embedding.weight'] = text_encoder_weights.pop('embedding.weight')
 
@@ -420,12 +423,16 @@ def main(args=None):
         # Ripristina i seed per la perfetta riproducibilità del rumore
         if 'torch_rng_state' in checkpoint:
             torch.set_rng_state(checkpoint['torch_rng_state'].cpu())
+        # Ogni GPU mantiene un proprio stato isolato
         if 'torch_cuda_rng_state' in checkpoint and checkpoint['torch_cuda_rng_state'] is not None:
             if torch.cuda.is_available():
+                # Estrazione degli stati di tutte le schede video originarie e trasferimento nella memoria RAM
                 cuda_rng_states = [state.cpu() for state in checkpoint['torch_cuda_rng_state']]
                 try:
+                    # Check del numero di stati CUDA con il numero di GPU attualmente installate
                     if len(cuda_rng_states) == torch.cuda.device_count():
                         torch.cuda.set_rng_state_all(cuda_rng_states)
+                    # Prende lo stato della prima GPU salvata
                     elif len(cuda_rng_states) > 0 and torch.cuda.device_count() > 0:
                         torch.cuda.set_rng_state(cuda_rng_states[0])
                 except (RuntimeError, ValueError) as rng_err:
@@ -440,7 +447,7 @@ def main(args=None):
     except (FileNotFoundError, IndexError):
         print("Nessun checkpoint trovato. Inizio addestramento da zero.")
 
-    # 10. Avvio dell'Addestramento (DEF-10, DEF-11)
+    # Avvio dell'Addestramento
     conditional_mode = parsed_args.conditional
     mode_str = "Condizionata" if conditional_mode else "Incondizionata (Baseline)"
     print(f"Avvio del loop di training - Modalità: {mode_str}...")

@@ -18,7 +18,8 @@ except ImportError:
 
 def make_ema_multi_avg_fn(decay: float = 0.9999):
     """
-    Funzione di multi-averaging per EMA compatibile e performante.
+    Funzione di multi-averaging per EMA.
+    Aggiorna i pesi storici theta_ema con i pesi correnti theta_cur secondo un fattore di decadimento
     Utilizza torch._foreach_lerp_ se disponibile, altrimenti esegue lerp_ in-place per ogni parametro.
     """
     weight = 1.0 - decay
@@ -26,9 +27,11 @@ def make_ema_multi_avg_fn(decay: float = 0.9999):
     @torch.no_grad()
     def ema_update(averaged_param_list, current_param_list, num_averaged):
         try:
+            # aggiornamento simultaneo dei tensori
             torch._foreach_lerp_(averaged_param_list, current_param_list, weight)
         except (AttributeError, RuntimeError):
             for p_avg, p_cur in zip(averaged_param_list, current_param_list):
+                # interpolazione lineare in-place
                 p_avg.lerp_(p_cur, weight)
 
     return ema_update
@@ -36,7 +39,7 @@ def make_ema_multi_avg_fn(decay: float = 0.9999):
 
 def strip_prefix(state_dict):
     """
-    Rimuove ricorsivamente eventuali prefissi 'module.' o '_orig_mod.' generati da DataParallel, DDP o torch.compile.
+    Rimuove ricorsivamente eventuali prefissi 'module.' o '_orig_mod.' generati da DataParallel, DDP o torch.compile dal dizionario dei pesi
     """
     cleaned = {}
     for k, v in state_dict.items():
@@ -59,10 +62,9 @@ def create_ema_model(
     device: Optional[Union[str, torch.device]] = None
 ) -> AveragedModel:
     """
-    Crea un modello Exponential Moving Average (EMA) per il denoiser UNet (R1).
-    Utilizza torch.optim.swa_utils.AveragedModel con get_ema_multi_avg_fn (implementazione
-    ufficiale e performante di PyTorch) per mantenere la media esponenziale mobile dei pesi
-    e prevenire il mode collapse durante la diffusione.
+    Crea un modello Exponential Moving Average (EMA) per il denoiser UNet.
+    Utilizza torch.optim.swa_utils.AveragedModel con get_ema_multi_avg_fn per mantenere la media esponenziale mobile dei pesi
+    e prevenire il model collapse durante la diffusione.
     """
     if not (0.0 <= decay <= 1.0):
         raise ValueError(f"ema_decay deve essere compreso tra 0.0 e 1.0, ricevuto: {decay}")
@@ -73,6 +75,7 @@ def create_ema_model(
 
     if device is None:
         try:
+            # Estrazione dispositivo: next estrae il primo tensore disponibile
             first_param = next(raw_model.parameters())
             dev = first_param.device
         except StopIteration:
@@ -94,6 +97,8 @@ def create_ema_model(
         device=dev,
         multi_avg_fn=multi_fn
     )
+
+    # Disabilitazione di Autograd
     for p in ema_model.parameters():
         p.requires_grad_(False)
     return ema_model
@@ -110,6 +115,7 @@ def extract_ema_state_dict(ema_unet):
         return None, None, None
 
     # 1. Unwrapping di eventuali wrapper esterni (es. DataParallel(AveragedModel))
+    # Itera sull'attributo finché non trova l'oggetto EMA vero e proprio
     avg_model = ema_unet
     while hasattr(avg_model, "module") and not hasattr(avg_model, "n_averaged"):
         avg_model = avg_model.module
@@ -128,9 +134,16 @@ def extract_ema_state_dict(ema_unet):
     raw_unet_sd = strip_prefix(inner_model.state_dict())
     raw_unet_sd = {k: v for k, v in raw_unet_sd.items() if k != "n_averaged"}
 
-    # 4. Estrazione dello state_dict canonico per AveragedModel ('module.<param>' e 'n_averaged')
+    # 4. Estrazione dello state_dict canonico per AveragedModel per permettere la ripresa del training da un checkpoint
     full_ema_sd = {}
+    # Tentativo di richiamo dello state dict. Tuttavia questo dizionario contiene tutti i pesi della rete ma le sue
+    # chiavi potrebbero presentare prefissi multipli
     source_sd = avg_model.state_dict() if hasattr(avg_model, "state_dict") else ema_unet.state_dict()
+    """
+    Finché la chiave corrente (clean_k) inizia con module. o _orig_mod., il ciclo rimuove questi prefissi (troncando 
+    rispettivamente i primi 7 o 10 caratteri) e ripete il controllo. Questo garantisce l'estrazione del nome "puro" del parametro, 
+    indipendentemente da quanti livelli di incapsulamento (wrapper) si siano sovrapposti durante il run.
+    """
     for k, v in source_sd.items():
         clean_k = k
         changed = True
@@ -147,6 +160,7 @@ def extract_ema_state_dict(ema_unet):
         else:
             full_ema_sd["n_averaged"] = v
 
+    # Fallback
     if "n_averaged" not in full_ema_sd and n_avg is not None:
         full_ema_sd["n_averaged"] = torch.tensor(n_avg, dtype=torch.long)
 
@@ -181,47 +195,6 @@ def get_unconditional_context(text_encoder, tokenizer, batch_size, max_seq_len, 
     uncond_context = text_encoder(uncond_tokens, mask)
     return uncond_context
 
-def configure_optimizers(
-    unet: nn.Module,
-    text_encoder: nn.Module,
-    lr: float = 1e-4,
-    weight_decay: float = 1e-4,
-    warmup_epochs: int = 5,
-    total_epochs: int = 50
-):
-    """
-    Configura l'ottimizzatore AdamW con weight decay disaccoppiato (DEF-19):
-    - Parametri 2D/4D (pesi) ricevono weight_decay.
-    - Parametri 1D (bias, LayerNorm, GroupNorm) ricevono weight_decay = 0.0.
-    Scheduler: Warmup lineare per 5 epoche seguito da Cosine Annealing via SequentialLR.
-    """
-    decay_params = []
-    no_decay_params = []
-    
-    for model in [unet, text_encoder]:
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if param.ndim <= 1 or "norm" in name.lower() or "bias" in name.lower():
-                no_decay_params.append(param)
-            else:
-                decay_params.append(param)
-                
-    optim_groups = [
-        {"params": decay_params, "weight_decay": weight_decay},
-        {"params": no_decay_params, "weight_decay": 0.0}
-    ]
-    optimizer = optim.AdamW(optim_groups, lr=lr)
-
-    # Scheduler con Warmup Lineare e Cosine Annealing
-    warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
-    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, total_epochs - warmup_epochs))
-    scheduler = optim.lr_scheduler.SequentialLR(
-        optimizer, 
-        schedulers=[warmup_scheduler, cosine_scheduler], 
-        milestones=[warmup_epochs]
-    )
-    return optimizer, scheduler
 
 def train(
     unet: nn.Module,
@@ -272,8 +245,14 @@ def train(
     elif ema_unet is not None and isinstance(ema_unet, nn.Module):
         ema_unet.to(device)
 
-    # AMP setup (DEF-14)
+    """
+    AMP (Automatic Mixed Precision) setup
+    Questa tecnica accekera l'addestramento convertendo alcune operazioni in formati a precisione ridotta, tuttavia, restringendo
+    il range numerico disponibile, aumentand il rischio che grandi gradienti causino un overflow o che, viceversa, piccoli gradienti 
+    causino underflow
+    """
     use_amp = (device.type == "cuda" and torch.cuda.is_available())
+    # Utilizzato per contrastare l'underflow, moltiplica la loss per un fattore di scala prima della backpropagation
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp) if use_amp else None
 
     criterion = nn.MSELoss()
@@ -342,18 +321,22 @@ def train(
                 predicted_v = unet(noisy_images, timesteps, context, mask=mask)
                 loss = criterion(predicted_v, v_target)
 
-            # 6. Backward pass con GradScaler (se AMP attivo) e decoupled gradient clipping (DEF-19)
+            # Backward pass con GradScaler (se AMP attivo) e decoupled gradient clipping
             step_executed = True
             if scaler is not None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(unet.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(text_encoder.parameters(), max_norm=1.0)
+                # salvataggio della scala corrente
                 scale_before = scaler.get_scale()
+                # Se i gradienti contenevano inf/NaN, GradScaler salta optimizer.step() e riduce la scala
                 scaler.step(optimizer)
                 scaler.update()
+
                 scale_after = scaler.get_scale()
-                # Se i gradienti contenevano inf/NaN, GradScaler salta optimizer.step() e riduce la scala
+
+                # Se il gradScaler ha ridotto il fattore, significa che lo step di ottimizzazione non è avvenuto
                 if scale_after < scale_before:
                     step_executed = False
             else:
