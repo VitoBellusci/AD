@@ -55,7 +55,7 @@ class AvatarGenerator:
         self.use_ema = use_ema
         self.config = PreprocessingConfig(config_path)
 
-        # Inizializzazione Tokenizer con guardia contro vocab.json mancante
+        # Inizializzazione Tokenizer con controllo contro vocab.json mancante
         self.tokenizer = AvatarTokenizer(self.config)
         vocab_path = getattr(self.config, "vocab_path", "preprocessing/vocab.json")
         if os.path.exists(vocab_path):
@@ -63,7 +63,7 @@ class AvatarGenerator:
         else:
             print(f"Avviso: File vocabolario '{vocab_path}' non trovato. Utilizzo token speciali di base.")
 
-        # Inizializzazione Modelli Architetturali (parametri conformi al budget Tiny da 8.56M parametri)
+        # Inizializzazione Modelli Architetturali
         vocab_size = len(self.tokenizer.vocab)
         self.text_encoder = FullTextEncoder(
             vocab_size=vocab_size,
@@ -184,7 +184,7 @@ class AvatarGenerator:
         if self.device.type == 'cuda':
             torch.cuda.manual_seed_all(seed)
 
-        # 1. Preparazione del testo condizionato
+        # Preparazione del testo condizionato
         tokens = self.tokenizer.encode(prompt)
         max_valid_id = self.text_encoder.embedding.num_embeddings - 1
         pad_token_id = min(self.tokenizer.vocab.get("<PAD>", 0), max_valid_id)
@@ -193,7 +193,7 @@ class AvatarGenerator:
         text_tensor = torch.tensor([tokens] * batch_size, dtype=torch.long, device=self.device)
         mask = (text_tensor != pad_token_id).unsqueeze(1).unsqueeze(2).to(self.device)
 
-        # 2. Preparazione del testo incondizionato (Classifier-Free Guidance)
+        # Preparazione del testo incondizionato (Classifier-Free Guidance)
         uncond_tokens = torch.full(
             (batch_size, self.config.max_seq_len),
             pad_token_id,
@@ -206,11 +206,11 @@ class AvatarGenerator:
             context = self.text_encoder(text_tensor, mask)
             uncond_context = self.text_encoder(uncond_tokens, uncond_mask)
 
-            # 3. Inizializzazione dal rumore puro
+            # Inizializzazione dal rumore puro
             h, w = self.config.resolution
             x = torch.randn((batch_size, 3, h, w), device=self.device)
 
-            # 4. Reverse Sampling Loop
+            # Reverse Sampling Loop
             total_timesteps = self.reverse_process.num_time_steps
 
             if num_steps >= total_timesteps:
@@ -273,7 +273,7 @@ class AvatarGenerator:
                         sqrt_one_minus_alpha_bar_prev = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev, min=0.0))
                         x = sqrt_alpha_bar_prev * pred_x0 + sqrt_one_minus_alpha_bar_prev * predicted_noise
 
-        # 5. Normalizzazione da [-1.0, 1.0] a [0.0, 1.0]
+        # Normalizzazione da [-1.0, 1.0] a [0.0, 1.0]
         img_tensor = (x.clamp(-1.0, 1.0) + 1.0) / 2.0
 
         # Salvataggio su disco se richiesto
@@ -361,7 +361,7 @@ def parse_args():
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=100,
+        default=1100,
         help="Numero di step per il campionamento accelerato DDIM (default: 50)"
     )
     parser.add_argument(
