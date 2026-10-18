@@ -184,7 +184,7 @@ def get_unconditional_context(text_encoder, tokenizer, batch_size, max_seq_len, 
     Genera l'embedding per il contesto incondizionato (testo vuoto o solo PAD).
     Utile sia per la baseline incondizionata che per il Classifier-Free Guidance.
     """
-    # Creiamo un tensore pieno di token <PAD> (o un token <UNK> vuoto)
+    # Creiamo un tensore pieno di token <PAD>
     pad_token_id = tokenizer.vocab.get("<PAD>", 0)
     uncond_tokens = torch.full((batch_size, max_seq_len), pad_token_id, dtype=torch.long, device=device)
     
@@ -276,7 +276,7 @@ def train(
 
             """            
             Si campiona un timestep t uniformemente per ogni immagine nel batch, da 0 al numero di timestep.
-            (batch_size,) definisce il livello di rumore, diverso per ogni immagine processata presente nel batch_size.
+            (batch_size,) definisce il livello di rumore, diverso per ogni immagine processata presente nel batch_size, per diversificare l'apprendimento
             """         
             timesteps = torch.randint(0, forward_process.num_time_steps, (batch_size,), device=device).long()
 
@@ -286,25 +286,37 @@ def train(
             # Processo Forward: aggiunta del rumore all'immagine pulita
             noisy_images = forward_process.add_noise(images, noise, timesteps)
 
-            # Estrazione del contesto testuale e maschera (DEF-04)
+            # Estrazione del contesto testuale e maschera
             # Inizializzazione esplicita a None per evitare UnboundLocalError quando conditional=False
             mask = None
             with torch.amp.autocast('cuda', enabled=use_amp):
                 if conditional:
                     pad_token_id = tokenizer.vocab.get("<PAD>", 0)
+                    # Maschera d'attenzione contenente true in corrispondenza dei token testuali effettivi e false negli indici occupati dai <PAD>
                     mask = (text_tokens != pad_token_id).unsqueeze(1).unsqueeze(2).to(device)
+                    # Embedding denso e semantico
                     context = text_encoder(text_tokens, mask)
 
                     # Classifier-Free Guidance (CFG) Dropout
                     # Con probabilità `cfg_drop_rate`, scartiamo il testo e passiamo un contesto vuoto.
                     if cfg_drop_rate > 0.0:
+                        # Genera per ciascuna immagine nel batch un valore stocastico compreso tra 0 e 1. Se tale valore risulta inferiore al rateo 
+                        # di dropout impostato, l'elemento corrispondente nel tensore booleano 1D diventerà True.
                         drop_mask = torch.rand(batch_size, device=device) < cfg_drop_rate
                         if drop_mask.any():
+                            # Embedding incondizionato
                             uncond_context = get_unconditional_context(
                                 text_encoder, tokenizer, batch_size, text_tokens.shape[1], device
                             )
+                            # Espande dimensionalmente la drop_mask e, per gli indici del batch in cui questa risulta true, sostituisce le feature
+                            # semantiche testuali precalcolate con l'embedding incondizionato
                             context = torch.where(drop_mask.unsqueeze(1).unsqueeze(2), uncond_context, context)
                             uncond_mask = torch.ones_like(mask)
+                            """
+                            Per gli elementi privi di prompt a causa del dropout, sovrascrive la maschera rigorosa calcolata al passaggio 3 con la 
+                            nuova maschera riempita di 1. Questa operazione inganna la cross-attention, forzando la rete a spalmare i pesi dell'attenzione 
+                            uniformemente sull'intero contesto vuoto.
+                            """
                             mask = torch.where(drop_mask.unsqueeze(1).unsqueeze(2).unsqueeze(3), uncond_mask, mask)
                 else:
                     # Per la baseline incondizionata, passiamo sempre un contesto vuoto e mask = None
@@ -313,19 +325,23 @@ def train(
                         text_encoder, tokenizer, batch_size, text_tokens.shape[1], device
                     )
 
-                # Calcolo del target di velocita (v_target) per v-prediction (R1)
+                # Calcolo del target di velocita (v_target) per v-prediction
                 # Formula: v_target = sqrt_alpha_bar_t * noise - sqrt_one_minus_alpha_bar_t * original
                 v_target = forward_process.get_velocity(images, noise, timesteps)
 
-                # 5. Predizione del target di velocita con supporto AMP (DEF-14) e maschera esplicita (DEF-04)
+                # Predizione del target di velocita con supporto AMP e maschera esplicita
                 predicted_v = unet(noisy_images, timesteps, context, mask=mask)
                 loss = criterion(predicted_v, v_target)
 
             # Backward pass con GradScaler (se AMP attivo) e decoupled gradient clipping
             step_executed = True
             if scaler is not None:
+                # Per impedire l'underflow causato dalle operazioni in formati a precisione ridotta, questo metodo moltiplica
+                # preventivamente la loss per un fattore di scala elevato
                 scaler.scale(loss).backward()
+                # Prima di poter applicare qualsiasi regolarizzazione sui gradienti, è necessario riportarli alla loro grandezza reale
                 scaler.unscale_(optimizer)
+                # Rimedio per l'overflow
                 torch.nn.utils.clip_grad_norm_(unet.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(text_encoder.parameters(), max_norm=1.0)
                 # salvataggio della scala corrente
@@ -345,7 +361,7 @@ def train(
                 torch.nn.utils.clip_grad_norm_(text_encoder.parameters(), max_norm=1.0)
                 optimizer.step()
 
-            # Aggiornamento pesi EMA UNet dopo ogni step di ottimizzazione riuscito (R2)
+            # Aggiornamento pesi EMA UNet dopo ogni step di ottimizzazione riuscito 
             if ema_unet is not None and step_executed:
                 raw_unet = unet
                 while hasattr(raw_unet, 'module'):
@@ -371,13 +387,15 @@ def train(
         avg_loss = epoch_loss / max(1, step)
         print(f"Epoch {epoch+1} completata | Loss Media: {avg_loss:.4f}")
 
-        # Validation loss tracking (DEF-10)
+        # Validation loss tracking 
         avg_val_loss = None
         if val_loader is not None and len(val_loader) > 0:
+            # Disattiva meccanismi come il dropout e congelando le statistiche dei layer di normalizzazione
             unet.eval()
             text_encoder.eval()
             val_loss = 0.0
             val_step = 0
+            # Disattivazione del tracciamento delle operazioni per prevenire l'accumulo in memoria dei tensori intermedi
             with torch.no_grad():
                 for val_images, val_tokens in val_loader:
                     val_images = val_images.to(device)
@@ -415,7 +433,7 @@ def train(
             unet.train()
             text_encoder.train()
 
-        # 7. Salvataggio del Checkpoint (permettendo di riprendere l'addestramento)
+        # Salvataggio del Checkpoint
         checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pt")
         checkpoint_dict = {
             'epoch': epoch + 1,
@@ -434,14 +452,17 @@ def train(
         if scaler is not None:
             checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
 
-        # Salvataggio pesi EMA UNet nel checkpoint (R2)
+        # Salvataggio pesi EMA UNet nel checkpoint
         if ema_unet is not None:
             raw_ema_sd, full_ema_sd, n_avg = extract_ema_state_dict(ema_unet)
             if raw_ema_sd is not None:
+                # Dizionario dei pesi senza prefissi
                 checkpoint_dict['ema_unet_state_dict'] = raw_ema_sd
             if full_ema_sd is not None:
+                # Dizionario strutturato con i prefissi .module
                 checkpoint_dict['ema_state_dict'] = full_ema_sd
             if n_avg is not None:
+                # Valore intero del contatore
                 checkpoint_dict['ema_n_averaged'] = n_avg
 
         torch.save(checkpoint_dict, checkpoint_path)
