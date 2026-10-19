@@ -44,7 +44,8 @@ class AvatarGenerator:
     """
     Gestisce l'inferenza del modello di diffusione, permettendo la generazione di 
     immagini da prompt testuali specificando un seed, e la valutazione di prompt OOD.
-    Supporta campionamento accelerato deterministico DDIM (Song et al., 2020) per inferenza rapida.
+    Esegue campionamento stocastico DDPM (Ho et al., 2020), sia su catena completa (1000 step)
+    sia accelerato su sotto-sequenza (eta=1.0) per qualsiasi numero di step specificato.
     """
     def __init__(self, config_path: str, checkpoint_path: str = None, device: str = None, use_ema: bool = True):
         if device is None:
@@ -171,14 +172,14 @@ class AvatarGenerator:
         prompt: str = "a cartoon avatar with brown skin, wavy hair, dark eyes, no glasses, and full beard",
         seed: int = 42,
         guidance_scale: float = 3.5,
-        num_steps: int = 20,
+        num_steps: int = 50,
         batch_size: int = 1,
-        plot: bool = False,
         output_dir: str = None
     ) -> torch.Tensor:
         """
         Genera un'immagine o un batch di immagini da prompt testuale.
-        Se num_steps < 1000, esegue campionamento deterministico DDIM accelerato.
+        Esegue campionamento probabilistico stocastico DDPM (Ho et al., 2020) a prescindere dal numero
+        di step specificato (catena completa se num_steps >= 1000, o sotto-sequenza stocastica eta=1.0 se num_steps < 1000).
         """
         torch.manual_seed(seed)
         if self.device.type == 'cuda':
@@ -187,6 +188,7 @@ class AvatarGenerator:
         # Preparazione del testo condizionato
         tokens = self.tokenizer.encode(prompt)
         max_valid_id = self.text_encoder.embedding.num_embeddings - 1
+        # Serve per assicurarsi che il numero non superi mai la capienza del modello testuale e che abbia id validi
         pad_token_id = min(self.tokenizer.vocab.get("<PAD>", 0), max_valid_id)
         unk_token_id = min(self.tokenizer.vocab.get("<UNK>", 1), max_valid_id)
         tokens = [t if 0 <= t <= max_valid_id else unk_token_id for t in tokens]
@@ -210,12 +212,14 @@ class AvatarGenerator:
             h, w = self.config.resolution
             x = torch.randn((batch_size, 3, h, w), device=self.device)
 
-            # Reverse Sampling Loop
+            # Reverse Sampling Loop: Campionamento DDPM
             total_timesteps = self.reverse_process.num_time_steps
 
+            # Confronto degli step richiesti con la catena completa
             if num_steps >= total_timesteps:
-                # Campionamento DDPM standard su 1000 step
+                # Campionamento DDPM standard su tutti i 1000 step
                 for t_step in reversed(range(total_timesteps)):
+                    # Allinea tutti gli elementi del batch allo step temporale corrente
                     t = torch.full((batch_size,), t_step, device=self.device, dtype=torch.long)
                     noise_free = (t_step == 0)
                     x = self.reverse_process.sample(
@@ -231,7 +235,15 @@ class AvatarGenerator:
                         clip_denoised=True
                     )
             else:
-                # Campionamento accelerato DDIM (Song et al., 2020)
+                """
+                Campionamento stocastico DDPM accelerato su sotto-sequenza
+                Dato che il metodo standard è tarato per rimuovere solo 1/1000 di rumore alla volta, se provassimo
+                a fare 50 step prendendo i timestep a salti di 20: al passo 980, il metodo toglie solo il rumore per arrivare a 979
+                ma al passo successivo ci ritroveremmo al passo 960, con l'immagine che contiene ancora il 99.7% del rumore originario
+                """
+                
+                # Seleziona un numero ridotto di step temporali, flippandoli. Durante l'iterazione, il sistema estrae matematicamente il valore
+                # dello step corrente (t_val) e quello dello step di destinazione (t_prev_val)
                 timesteps = torch.linspace(0, total_timesteps - 1, steps=num_steps).long().to(self.device)
                 reversed_timesteps = timesteps.flip(0)
 
@@ -256,22 +268,33 @@ class AvatarGenerator:
                     else:
                         predicted_v = self.unet(x, t, context=context, mask=mask)
 
-                    # Ricostruzione x_0 e rumore dalla velocita predetta (v-parameterization, R3)
+                    # Ricostruzione x_0 e rumore dalla velocità predetta
                     pred_x0 = self.reverse_process.predict_x0_from_v(x, predicted_v, t)
                     pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
-                    
-                    # Recalculate predicted_noise using the clipped pred_x0 to avoid accumulation of errors
-                    alpha_bar_t = self.reverse_process._extract(self.reverse_process.alpha_bars, t, x)
-                    predicted_noise = (x - torch.sqrt(alpha_bar_t) * pred_x0) / torch.sqrt(1.0 - alpha_bar_t)
 
+                    # Ricalcolo predicted_noise da pred_x0 clippato per coerenza numerica, a causa del taglio 
+                    alpha_bar_t = self.reverse_process._extract(self.reverse_process.alpha_bars, t, x)
+                    predicted_noise = (x - torch.sqrt(alpha_bar_t) * pred_x0) / torch.sqrt(torch.clamp(1.0 - alpha_bar_t, min=1e-20))
+
+                    # Se non siamo all'ultimo step della catena
                     if t_prev_val is None:
                         x = pred_x0
                     else:
                         t_prev = torch.full((batch_size,), t_prev_val, device=self.device, dtype=torch.long)
+                        # coefficiente cumulativo del rumore per lo step precedente
                         alpha_bar_prev = self.reverse_process._extract(self.reverse_process.alpha_bars, t_prev, x)
-                        sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
-                        sqrt_one_minus_alpha_bar_prev = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev, min=0.0))
-                        x = sqrt_alpha_bar_prev * pred_x0 + sqrt_one_minus_alpha_bar_prev * predicted_noise
+
+                        # Varianza a posteriori stocastica, interpolando le informazioni del tempo corrente e precedente
+                        sigma_t2 = ((1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)) * (1.0 - alpha_bar_t / alpha_bar_prev)
+                        sigma_t = torch.sqrt(torch.clamp(sigma_t2, min=0.0))
+
+                        # Direzione scalata verso x_t
+                        dir_xt = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev - sigma_t**2, min=0.0))
+
+                        # Iniezione stocastica del rumore gaussiano. Il nuovo stato latente viene formato miscelando la stima di x pesata
+                        # la componente di rumore direzionale e iniettando un nuovo termine di disturbo scalato
+                        noise = torch.randn_like(x)
+                        x = torch.sqrt(alpha_bar_prev) * pred_x0 + dir_xt * predicted_noise + sigma_t * noise
 
         # Normalizzazione da [-1.0, 1.0] a [0.0, 1.0]
         img_tensor = (x.clamp(-1.0, 1.0) + 1.0) / 2.0
@@ -285,19 +308,6 @@ class AvatarGenerator:
                 save_image(img_tensor[b_idx], out_path)
                 print(f"Immagine salvata in: {out_path}")
 
-        # Visualizzazione opzionale
-        if plot:
-            try:
-                for b_idx in range(batch_size):
-                    img_np = img_tensor[b_idx].cpu().permute(1, 2, 0).numpy()
-                    plt.figure(figsize=(4, 4))
-                    plt.imshow(img_np)
-                    plt.title(f"Seed: {seed} | Steps: {num_steps}\n{prompt[:35]}...", fontsize=9)
-                    plt.axis("off")
-                    plt.show()
-            except Exception as e:
-                print(f"Visualizzazione grafica non disponibile: {e}")
-
         return img_tensor
 
     def evaluate_ood_combinations(
@@ -308,7 +318,7 @@ class AvatarGenerator:
         num_steps: int = 50
     ):
         """
-        Ispeziona le generazioni su prompt composizionali OOD testando multipli seed (DEF-12).
+        Ispeziona le generazioni su prompt composizionali OOD testando multipli seed.
         """
         if ood_prompts is None:
             ood_prompts = [
@@ -327,7 +337,6 @@ class AvatarGenerator:
                     seed=seed,
                     num_steps=num_steps,
                     batch_size=1,
-                    plot=False,
                     output_dir=output_dir
                 )
                 print(f"  [Seed {seed}] Generazione completata con successo.")
@@ -338,62 +347,52 @@ def parse_args():
         "--prompt",
         type=str,
         default="a cartoon avatar with pale skin, blonde hair, dark eyes, round glasses, and no facial hair",
-        help="Prompt testuale per condizionare la generazione dell'avatar"
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Seed per garantire riproducibilità"
     )
     parser.add_argument(
         "--guidance_scale",
         type=float,
         default=4,
-        help="Scala per Classifier-Free Guidance (CFG)"
     )
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
-        help="Percorso esplicito del file di checkpoint (.pt)"
     )
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=1100,
-        help="Numero di step per il campionamento accelerato DDIM (default: 50)"
+        default=1000,
     )
     parser.add_argument(
         "--batch_size",
         type=int,
         default=1,
-        help="Numero di immagini da generare in parallelo"
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="outputs",
-        help="Cartella di destinazione per salvare le immagini generate"
     )
     parser.add_argument(
         "--test_ood",
         action="store_true",
         default=False,
-        help="Esegui la suite di valutazione composizionale Out-Of-Distribution (OOD)"
     )
     parser.add_argument(
         "--use_ema",
         dest="use_ema",
         action="store_true",
         default=True,
-        help="Utilizza i pesi EMA UNet se disponibili nel checkpoint (default: True)"
     )
     parser.add_argument(
         "--no_ema",
         dest="use_ema",
         action="store_false",
-        help="Disabilita l'uso dei pesi EMA e carica i pesi regolari di UNet"
     )
     return parser.parse_args()
 
@@ -420,8 +419,9 @@ if __name__ == "__main__":
             num_steps=args.num_steps
         )
     else:
+        mode_str = "catena completa" if args.num_steps >= generator.reverse_process.num_time_steps else f"sotto-sequenza stocastica ({args.num_steps} step, eta=1.0)"
         print(f"\nGenerazione per prompt: '{args.prompt}'")
-        print(f"Parametri: Seed={args.seed}, Steps={args.num_steps}, Guidance={args.guidance_scale}, Batch={args.batch_size}")
+        print(f"Parametri: Seed={args.seed}, Steps={args.num_steps} [DDPM {mode_str}], Guidance={args.guidance_scale}, Batch={args.batch_size}")
         generator.generate(
             prompt=args.prompt,
             seed=args.seed,
@@ -429,6 +429,5 @@ if __name__ == "__main__":
             num_steps=args.num_steps,
             batch_size=args.batch_size,
             output_dir=args.output_dir,
-            plot=False
         )
     print("\n--- Processo di inferenza completato con successo! ---")

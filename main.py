@@ -93,28 +93,23 @@ def configure_optimizers(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Avatar Diffusion Training Pipeline")
-    parser.add_argument("--conditional", dest="conditional", action="store_true", default=True,
-                        help="Train conditional diffusion model (default: True)")
-    parser.add_argument("--unconditional", dest="conditional", action="store_false",
-                        help="Train unconditional baseline (DEF-11)")
-    parser.add_argument("--epochs", type=int, default=70, help="Total training epochs (default: 70)")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size (default: 128)")
-    parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate (default: 5e-5)")
-    parser.add_argument("--cfg_drop_rate", type=float, default=0.1, help="CFG dropout rate (default: 0.1)")
+    parser.add_argument("--conditional", dest="conditional", action="store_true", default=True)
+    parser.add_argument("--unconditional", dest="conditional", action="store_false")
+    parser.add_argument("--epochs", type=int, default=70)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--cfg_drop_rate", type=float, default=0.1)
     default_ckpt_dir = "/kaggle/working" if os.path.exists("/kaggle/working") else "checkpoints"
-    parser.add_argument("--checkpoint_dir", type=str, default=default_ckpt_dir, help="Directory for checkpoints")
-    parser.add_argument("--resume", type=str, default=None, help="Explicit checkpoint path to resume from")
-    parser.add_argument("--max_steps", type=int, default=None, help="Max steps per epoch for fast dummy/verification run")
-    parser.add_argument("--use_ema", dest="use_ema", action="store_true", default=True,
-                        help="Enable Exponential Moving Average (EMA) for UNet (default: True)")
-    parser.add_argument("--no_ema", dest="use_ema", action="store_false",
-                        help="Disable Exponential Moving Average (EMA) for UNet")
-    parser.add_argument("--ema_decay", type=float, default=0.999,
-                        help="Exponential Moving Average decay factor (default: 0.999)")
-    parser.add_argument("--data_dir", type=str, default="data", help="Directory containing dataset")
-    parser.add_argument("--image_dir", type=str, default=None, help="Explicit directory for cartoonset images")
-    parser.add_argument("--csv_path", type=str, default=None, help="Explicit path to cartoon_image_attributes.csv")
-    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader num_workers (default: 4)")
+    parser.add_argument("--checkpoint_dir", type=str, default=default_ckpt_dir)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--use_ema", dest="use_ema", action="store_true", default=True)
+    parser.add_argument("--no_ema", dest="use_ema", action="store_false")
+    parser.add_argument("--ema_decay", type=float, default=0.999)
+    parser.add_argument("--data_dir", type=str, default="data")
+    parser.add_argument("--image_dir", type=str, default=None)
+    parser.add_argument("--csv_path", type=str, default=None)
+    parser.add_argument("--num_workers", type=int, default=4)
     return parser
 
 def main(args=None):
