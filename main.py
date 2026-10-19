@@ -113,7 +113,6 @@ def parse_args():
     return parser
 
 def main(args=None):
-    # 1. Parse argomenti CLI e configurazione (DEF-11)
     parser = parse_args()
     if args is None:
         if "--epochs" not in sys.argv and "--max_steps" in sys.argv:
@@ -133,7 +132,7 @@ def main(args=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Dispositivo in uso: {device}")
 
-    # 2. Inizializzazione Configurazione
+    # Inizializzazione Configurazione
     config = PreprocessingConfig("./preprocessing/preprocessing_config.json")
 
     # CARICAMENTO METADATI GOOGLE CARTOON SET (supporto locale e Kaggle)
