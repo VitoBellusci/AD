@@ -16,10 +16,6 @@ from preprocessing.config import PreprocessingConfig
 from metrics import DiffusionEvaluator
 
 def resolve_checkpoint(checkpoint_dir: str = "checkpoints", explicit_path: str = None) -> str:
-    """
-    Risolve il checkpoint in modo deterministico estraendo l'indice numerico di epoca via regex.
-    Supporta un percorso esplicito fornito dall'utente.
-    """
     if explicit_path:
         if os.path.exists(explicit_path):
             return explicit_path
@@ -41,10 +37,6 @@ def resolve_checkpoint(checkpoint_dir: str = "checkpoints", explicit_path: str =
     return max(candidates, key=extract_epoch)
 
 def load_eval_dataset(data_dir: str, config: PreprocessingConfig, tokenizer: AvatarTokenizer) -> AvatarDataset:
-    """
-    Carica il dataset in modo flessibile supportando sia l'inizializzazione diretta con data_dir
-    che quella basata su image_paths e metadata.
-    """
     try:
         return AvatarDataset(data_dir=data_dir, config=config, tokenizer=tokenizer)
     except TypeError:
@@ -106,7 +98,7 @@ def sample_batch(
 ):
     """
     Reverse sampling con supporto sia per DDPM standard (1000 step)
-    che per campionamento deterministico accelerato DDIM (< 1000 step).
+    sia per campionamento stocastico DDPM accelerato su sotto-sequenza (< 1000 step).
     """
     batch_size = shape[0]
     total_timesteps = reverse_process.num_time_steps
@@ -124,6 +116,7 @@ def sample_batch(
                 clip_denoised=True
             )
     else:
+        # Campionamento stocastico DDPM accelerato su sotto-sequenza
         timesteps = torch.linspace(0, total_timesteps - 1, steps=num_steps).long().to(device)
         reversed_timesteps = timesteps.flip(0)
 
@@ -147,19 +140,30 @@ def sample_batch(
             else:
                 predicted_v = unet(x, t, context=cond_ctx, mask=mask)
 
-            # Ricostruzione x_0 e rumore dalla velocity predetta (v-parameterization, R3)
+            # Ricostruzione x_0 dalla velocità predetta (v-parameterization)
             pred_x0 = reverse_process.predict_x0_from_v(x, predicted_v, t)
-            predicted_noise = reverse_process.predict_noise_from_v(x, predicted_v, t)
             pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+
+            # Ricalcolo predicted_noise da pred_x0 clippato per coerenza numerica
+            alpha_bar_t = reverse_process._extract(reverse_process.alpha_bars, t, x)
+            predicted_noise = (x - torch.sqrt(alpha_bar_t) * pred_x0) / torch.sqrt(torch.clamp(1.0 - alpha_bar_t, min=1e-20))
 
             if t_prev_val is None:
                 x = pred_x0
             else:
                 t_prev = torch.full((batch_size,), t_prev_val, device=device, dtype=torch.long)
                 alpha_bar_prev = reverse_process._extract(reverse_process.alpha_bars, t_prev, x)
-                sqrt_alpha_bar_prev = torch.sqrt(alpha_bar_prev)
-                sqrt_one_minus_alpha_bar_prev = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev, min=0.0))
-                x = sqrt_alpha_bar_prev * pred_x0 + sqrt_one_minus_alpha_bar_prev * predicted_noise
+
+                # Varianza a posteriori stocastica
+                sigma_t2 = ((1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)) * (1.0 - alpha_bar_t / alpha_bar_prev)
+                sigma_t = torch.sqrt(torch.clamp(sigma_t2, min=0.0))
+
+                # Direzione scalata verso x_t
+                dir_xt = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev - sigma_t**2, min=0.0))
+
+                # Iniezione stocastica del rumore gaussiano
+                noise = torch.randn_like(x)
+                x = torch.sqrt(alpha_bar_prev) * pred_x0 + dir_xt * predicted_noise + sigma_t * noise
 
     return x
 
@@ -168,7 +172,7 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
     print(f"--- Avvio Valutazione Rigorosa su Device: {device} ---")
     print(f"Caricamento checkpoint: {checkpoint_path}")
 
-    # 1. Inizializzazione Configurazione e Tokenizer
+    # Inizializzazione configurazione e tokenizer
     config_path = "preprocessing/preprocessing_config.json"
     if not os.path.exists(config_path):
         config_path = "./preprocessing/preprocessing_config.json"
@@ -181,7 +185,7 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
     else:
         print(f"Avviso: Vocabolario non trovato in '{vocab_path}', utilizzo token speciali di default.")
 
-    # 2. Inizializzazione e Caricamento Modelli
+    # Inizializzazione e caricamento modelli
     unet = Unet(in_channels=3, out_channels=3, base_channels=96, context_dim=256).to(device)
     text_encoder = FullTextEncoder(
         vocab_size=len(tokenizer.vocab), 
@@ -264,7 +268,7 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
     unet.eval()
     text_encoder.eval()
 
-    # 3. Caricamento Dataset e Partizioni (In-Distribution vs OOD)
+    # Caricamento dataset e partizioni (In-Distribution vs OOD)
     dataset = load_eval_dataset(data_dir=data_dir, config=config, tokenizer=tokenizer)
     splits_path = getattr(config, "splits_path", "preprocessing/splits.json")
     
@@ -281,10 +285,14 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
 
     evaluator = DiffusionEvaluator(device=device)
 
-    # 4. Metriche di Efficienza Computazionale
+    # Metriche di Efficienza Computazionale
     print("\n==========================================")
     print("Metriche di Efficienza Computazionale:")
     print("==========================================")
+    """
+    Vengono estratti il numero totale di parametri, i parametri specifici della U-Net, i parametri del Text Encoder,
+    la latenza di campionamento in secondi e il picco di utilizzo della VRAM in MB
+    """
     eff_metrics = evaluator.compute_efficiency_metrics(unet, text_encoder, device)
     print(f"  Parametri Totali: {eff_metrics['Total Parameters']:,}")
     print(f"  Parametri U-Net: {eff_metrics['U-Net Parameters']:,}")
@@ -292,7 +300,7 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
     print(f"  Latenza di Campionamento: {eff_metrics['Sampling Latency (s)']:.4f} s")
     print(f"  Picco VRAM: {eff_metrics['Peak VRAM Usage (MB)']:.2f} MB")
 
-    # 5. Valutazione Diversità tra Seed (Pairwise LPIPS)
+    # Valutazione Diversità tra Seed (Pairwise LPIPS)
     print("\n==========================================")
     print("Valutazione Diversità tra Seed (Pairwise LPIPS):")
     print("==========================================")
@@ -344,7 +352,7 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
     if diversity_scores:
         print(f"  Diversità Media Pairwise LPIPS: {sum(diversity_scores)/len(diversity_scores):.4f}")
 
-    # 6. Loop di Valutazione Qualitativa per ciascuna partizione (IID vs OOD)
+    # Loop di valutazione qualitativa per ciascuna partizione (IID vs OOD)
     for split_name, indices in splits_to_eval.items():
         if len(indices) == 0:
             print(f"ATTENZIONE: Partizione '{split_name}' vuota! Salto.")
@@ -354,9 +362,12 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
         print(f"Valutazione su Partizione: {split_name} (Campioni totali: {len(indices)})")
         print(f"==========================================")
 
+        # Slicing degli indici selezionando il minimo tra i campioni richiesti e quelli effettivamente disponibili
         eval_indices = indices[:min(num_samples, len(indices))]
+        # Disattivare lo shuffle garantisce che le valutazioni siano deterministiche e riproducibili
         subset_loader = DataLoader(Subset(dataset, eval_indices), batch_size=batch_size, shuffle=False)
 
+        # Counter
         samples_accumulated = 0
 
         with torch.no_grad():
@@ -369,6 +380,8 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
                 max_valid_id = text_encoder.embedding.num_embeddings - 1
                 pad_id = min(tokenizer.vocab.get("<PAD>", 0), max_valid_id)
                 unk_token_id = min(tokenizer.vocab.get("<UNK>", 1), max_valid_id)
+                # Sostituisce dinamicamente nel tensore ogni token testuale negativo o
+                # maggiore del limite consentito con l'ID di emergenza unk_token_id
                 text_tokens = torch.where(
                     (text_tokens >= 0) & (text_tokens <= max_valid_id),
                     text_tokens,
@@ -382,7 +395,7 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
                 uncond_mask = torch.ones_like(mask)
                 uncond_ctx = text_encoder(uncond_tokens, uncond_mask)
 
-                # Reverse sampling loop con DDPM / DDIM accelerato
+                # Reverse sampling loop con DDPM accelerato
                 h, w = config.resolution
                 fake_images = sample_batch(
                     unet=unet,
@@ -397,7 +410,7 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
                     guidance_scale=3.5
                 )
 
-                # Accumulo batch obbligatorio per FID e KID prima di .compute()
+                # Accumulo batch obbligatorio per FID e KID prima di .compute(), iniettando nel buffer le distribuzioni reali e predette
                 evaluator.update_quality_metrics(real_images, fake_images)
                 samples_accumulated += curr_b
 
@@ -411,23 +424,21 @@ def evaluate(checkpoint_path: str, data_dir: str = "data", batch_size: int = 50,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Valutazione Accademica Avatar Diffusion")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Percorso del file checkpoint (.pt)")
-    parser.add_argument("--batch_size", type=int, default=50, help="Batch size per la generazione e valutazione")
-    parser.add_argument("--num_samples", type=int, default=100, help="Numero massimo di campioni da valutare per partizione")
-    parser.add_argument("--num_steps", type=int, default=50, help="Numero di step di campionamento (DDIM se < 1000, DDPM se >= 1000)")
-    parser.add_argument("--data_dir", type=str, default="data", help="Directory dei dati del dataset")
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=50)
+    parser.add_argument("--num_samples", type=int, default=100)
+    parser.add_argument("--num_steps", type=int, default=50)
+    parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument(
         "--use_ema",
         dest="use_ema",
         action="store_true",
         default=True,
-        help="Utilizza i pesi EMA UNet se disponibili nel checkpoint (default: True)"
     )
     parser.add_argument(
         "--no_ema",
         dest="use_ema",
         action="store_false",
-        help="Disabilita l'uso dei pesi EMA e valuta i pesi regolari di UNet"
     )
     args = parser.parse_args()
 

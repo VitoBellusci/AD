@@ -13,13 +13,13 @@ class DiffusionEvaluator:
     def __init__(self, device="cuda" if torch.cuda.is_available() else "cpu"):
         self.device = torch.device(device)
         
-        # Metriche di Qualità Immagine (FID e KID)
+        # Metriche di qualità immagine (FID e KID)
         # feature=64 è un compromesso standard per immagini a bassa risoluzione (32x32 o 64x64)
         self.fid = FrechetInceptionDistance(feature=64, normalize=True).to(self.device)
         # Il subset_size del KID deve essere minore o uguale al numero di campioni forniti
         self.kid = KernelInceptionDistance(subset_size=50, normalize=True).to(self.device)
         
-        # Metrica di Diversità (LPIPS usa VGG per misurare la distanza percettiva tra patch)
+        # Metrica di diversità (LPIPS usa VGG per misurare la distanza percettiva tra patch)
         self.lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(self.device)
 
     def compute_efficiency_metrics(
@@ -43,12 +43,12 @@ class DiffusionEvaluator:
 
         dev = torch.device(device) if device is not None else self.device
 
-        # 1. Conteggio Parametri
+        # Conteggio Parametri
         unet_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
         text_enc_params = sum(p.numel() for p in text_encoder.parameters() if p.requires_grad)
         total_params = unet_params + text_enc_params
 
-        # 2. Utilizzo Memoria e Tempo di Campionamento
+        # Utilizzo Memoria e Tempo di Campionamento
         max_vram_mb = 0.0
         sampling_time = 0.0
 
@@ -91,7 +91,7 @@ class DiffusionEvaluator:
         """
         Normalizza in modo indipendente un tensore di immagini a [0.0, 1.0].
         Gestisce in modo sicuro input sia in [-1.0, 1.0] che in [0.0, 1.0],
-        applicando clamp rigoroso per prevenire overflow in Inception-v3.
+        applicando clamp rigoroso per prevenire overflow
         """
         if images.min() < 0.0:
             images = (images + 1.0) / 2.0
@@ -170,7 +170,7 @@ class DiffusionEvaluator:
 class AttributeAlignmentEvaluator:
     """
     Attribute classification verification probe to evaluate whether
-    generated images match their text conditioning attributes (Blueprint 2.4).
+    generated images match their text conditioning attributes
     """
     def __init__(self, classifier_model, device):
         self.device = torch.device(device)
