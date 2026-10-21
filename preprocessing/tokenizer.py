@@ -28,7 +28,7 @@ class AvatarTokenizer:
         Costruisce il vocabolario preservando i token speciali.
         I nuovi token partono tassativamente da ID 4.
         """
-        word_count = max(self.vocab.values())  # Inizia da 3: il primo token aggiunto avra ID 4
+        word_count = max(self.vocab.values())  # Inizia da 3: il primo token aggiunto avrà ID 4
         for text in training_texts:
             tokens = self._tokenize(text)
             for token in tokens:

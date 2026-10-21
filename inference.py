@@ -178,8 +178,7 @@ class AvatarGenerator:
     ) -> torch.Tensor:
         """
         Genera un'immagine o un batch di immagini da prompt testuale.
-        Esegue campionamento probabilistico stocastico DDPM (Ho et al., 2020) a prescindere dal numero
-        di step specificato (catena completa se num_steps >= 1000, o sotto-sequenza stocastica eta=1.0 se num_steps < 1000).
+        Esegue campionamento probabilistico stocastico DDPM (catena completa se num_steps >= 1000, o sotto-sequenza stocastica eta=1.0 se num_steps < 1000).
         """
         torch.manual_seed(seed)
         if self.device.type == 'cuda':
@@ -346,7 +345,7 @@ def parse_args():
     parser.add_argument(
         "--prompt",
         type=str,
-        default="a cartoon avatar with pale skin, blonde hair, dark eyes, round glasses, and no facial hair",
+        default="a cartoon avatar with pale skin, brushed hair, dark eyes, no glasses, and no facial hair",
     )
     parser.add_argument(
         "--seed",
@@ -366,7 +365,7 @@ def parse_args():
     parser.add_argument(
         "--num_steps",
         type=int,
-        default=1000,
+        default=100,
     )
     parser.add_argument(
         "--batch_size",
