@@ -1,1 +1,1 @@
-https://www.kaggle.com/datasets/brendanartley/cartoon-faces-googles-cartoon-set/data
+Dataset: https://www.kaggle.com/datasets/vitobellu/cartoon-set
